@@ -1,0 +1,59 @@
+# SubSplit sync server — Cloudflare Workers deploy config.
+#
+# Everything below fits the Cloudflare free tier: no credit card, no custom
+# domain, a free *.workers.dev subdomain, and no cold starts.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME SETUP (run these from inside the `server/` directory)
+# ---------------------------------------------------------------------------
+#
+#   1. Create the database:
+#
+#        npx wrangler d1 create subsplit
+#
+#      Copy the `database_id` it prints and paste it into `database_id` below,
+#      replacing PASTE_DATABASE_ID_HERE.
+#
+#   2. Create the tables:
+#
+#        npx wrangler d1 execute subsplit --remote --file=schema.sql
+#
+#   3. Set the admin secret that guards `POST /v1/groups` (pick a long random
+#      string; you only need it once, to create the group):
+#
+#        npx wrangler secret put ADMIN_TOKEN
+#
+#   4. Deploy:
+#
+#        npx wrangler deploy
+#
+#   5. Create the group and grab the join token to share with the others:
+#
+#        curl -X POST https://subsplit-server.<your-subdomain>.workers.dev/v1/groups \
+#             -H "X-Admin-Token: <the ADMIN_TOKEN you just set>"
+#
+#      The response is {"group_id":"...","join_token":"ss_<group>_<secret>"}.
+#      Everyone in the group pastes that join token into SubSplit's onboarding
+#      screen along with the Worker URL. Treat it like a password — anyone
+#      holding it can read and write the group's usage numbers.
+#
+# Prefer not to use Cloudflare? `node server/local.js` speaks the identical
+# HTTP contract from a JSON file on any host you already own.
+
+name = "subsplit-server"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Keep observability off unless you want request logs retained by Cloudflare —
+# this server carries per-person usage data.
+[observability]
+enabled = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "subsplit"
+database_id = "PASTE_DATABASE_ID_HERE"
+
+# ADMIN_TOKEN is deliberately NOT declared under [vars] — it is a secret and
+# must be set with `npx wrangler secret put ADMIN_TOKEN` so it never lands in
+# version control. Until it is set, POST /v1/groups returns 503 admin_disabled.

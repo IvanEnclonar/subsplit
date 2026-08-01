@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta name="color-scheme" content="light dark" />
+<title>SubSplit</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main class="app" id="app">
+
+  <!-- ───────────────────────── loading ───────────────────────── -->
+  <section class="view view-loading" data-view="loading">
+    <div class="loading-inner">
+      <span class="pulse" aria-hidden="true"></span>
+      <p class="loading-text" data-role="loading-text">Loading…</p>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="reload" hidden>Try again</button>
+    </div>
+  </section>
+
+  <!-- ─────────────────── onboarding / settings ─────────────────── -->
+  <section class="view view-form" data-view="form" hidden>
+    <header class="titlebar">
+      <button type="button" class="icon-btn titlebar-back" data-action="form-back" title="Back" aria-label="Back" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+      </button>
+      <div class="titlebar-title">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span data-role="form-title">Join your group</span>
+      </div>
+      <div class="titlebar-spacer"></div>
+    </header>
+
+    <div class="form-body">
+      <p class="lede" data-role="form-lede">Point SubSplit at your group’s server and paste the join token you were given.</p>
+
+      <form class="form" data-role="form" novalidate>
+        <div class="field">
+          <label class="field-label" for="f-server">Server URL</label>
+          <input class="input" id="f-server" data-role="f-server" type="text" inputmode="url"
+                 placeholder="https://subsplit.example.workers.dev" spellcheck="false"
+                 autocomplete="off" autocapitalize="off" autocorrect="off" />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="f-token">Join token</label>
+          <input class="input" id="f-token" data-role="f-token" type="password"
+                 placeholder="ss_…" spellcheck="false" autocomplete="off" />
+          <p class="field-hint" data-role="f-token-hint" hidden>Leave blank to keep the token you already have.</p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="f-name">Your name</label>
+          <input class="input" id="f-name" data-role="f-name" type="text" maxlength="40"
+                 placeholder="Alex" spellcheck="false" autocomplete="off" />
+        </div>
+
+        <p class="form-error" data-role="form-error" hidden></p>
+
+        <button type="submit" class="btn btn-primary" data-role="form-submit">Join group</button>
+      </form>
+
+      <p class="privacy">
+        <svg class="privacy-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
+          <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+        </svg>
+        <span>Only token counts leave this machine — never your code or prompts.</span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── dashboard ───────────────────────── -->
+  <section class="view view-dash" data-view="dash" hidden>
+    <header class="titlebar">
+      <div class="titlebar-title">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>SubSplit</span>
+      </div>
+      <div class="titlebar-spacer"></div>
+      <div class="seg" data-role="seg" role="group" aria-label="Primary window" hidden>
+        <button type="button" class="seg-btn" data-window="weekly" aria-pressed="false">Weekly</button>
+        <button type="button" class="seg-btn" data-window="5h" aria-pressed="false">5h</button>
+      </div>
+    </header>
+
+    <div class="banner" data-role="banner" hidden>
+      <svg class="banner-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+        <path d="M12 9.5v4" />
+        <path d="M12 17.2h.01" />
+      </svg>
+      <span class="banner-text" data-role="banner-text"></span>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="retry">Retry</button>
+    </div>
+
+    <section class="account" data-role="account" aria-label="Account usage"></section>
+
+    <div class="list-head">
+      <span data-role="list-head">Members</span>
+      <span class="list-head-hint" data-role="fair-hint"></span>
+    </div>
+
+    <div class="members" data-role="members"></div>
+
+    <footer class="footer">
+      <span class="synced" data-role="synced">—</span>
+      <div class="footer-actions">
+        <button type="button" class="icon-btn" data-action="refresh" title="Refresh now" aria-label="Refresh now">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" data-action="settings" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" data-action="quit" title="Quit SubSplit" aria-label="Quit SubSplit">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v9" />
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+          </svg>
+        </button>
+      </div>
+    </footer>
+  </section>
+
+</main>
+<script src="app.js"></script>
+</body>
+</html>

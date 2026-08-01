@@ -1,0 +1,53 @@
+{
+  "name": "subsplit",
+  "version": "0.1.0",
+  "description": "Share one Codex subscription fairly — everyone's token usage, in everyone's menu bar / system tray",
+  "main": "src/main/index.js",
+  "license": "MIT",
+  "author": "subsplit contributors",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/*.test.js\"",
+    "gen-icons": "node scripts/gen-icons.js",
+    "server:local": "node server/local.js",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "43.2.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "app.subsplit",
+    "productName": "SubSplit",
+    "icon": "assets/icon.png",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64", "arm64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}
