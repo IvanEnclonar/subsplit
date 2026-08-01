@@ -82,6 +82,19 @@ curl -X POST https://subsplit-server.<your-subdomain>.workers.dev/v1/groups \
 Share the server URL and the `join_token` with the group over a channel you trust. The
 `ADMIN_TOKEN` stays with you — it is only used to create groups.
 
+Easier: join once yourself, then open the gear and hit **Copy invite**. That puts a single
+chat-safe code on your clipboard which carries both halves, so nobody has to retype a token:
+
+```
+subsplit1-<base64url({"u":"<server URL>","t":"<join token>"})>
+```
+
+The `subsplit1-` prefix is required, and the code can be pasted with text around it. It is
+still the group secret in one line — send it the same way you would send the raw token.
+Because the code is opaque, an invite is only ever as trustworthy as whoever sent it: SubSplit
+refuses any whose URL carries credentials (`https://real-looking-host@elsewhere`) and shows
+you the real server URL in the form before you join.
+
 Prefer not to use Cloudflare? `npm run server:local` runs the identical API on plain
 `node:http` with JSON-file persistence, for a box you already own.
 
@@ -92,6 +105,12 @@ Prefer not to use Cloudflare? `npm run server:local` runs the identical API on p
    token**, **Your name**.
 3. Paste the server URL and join token the admin sent you, type the name your group will
    recognise, and hit Join.
+
+Got an invite code instead? Copy it, hit **Paste invite**, and the first two fields fill
+themselves — the token goes straight into the app without ever being shown. Tidying the
+server URL up (a trailing slash, say) keeps the invite; pointing the form at a different
+server drops it, because that is not the server it was issued for. Ordinary pasting works
+everywhere too: Cmd+V / Ctrl+V, or right-click a field for Cut/Copy/Paste/Select All.
 
 Joining is idempotent and keyed on a slug of your name, so installing SubSplit on a second
 machine with the same name binds both devices to one member — their totals get summed.
@@ -151,6 +170,10 @@ system tray icons** and turn it on. There is no API to force promotion.
   `account used% × (their tokens / the group's tokens)` for the window on screen — "~31% of
   weekly limit". It is an estimate built on the caveat below, but it answers the question
   people actually ask: how much of the subscription have *I* eaten this week.
+- **The pace line answers "will this last the week?"** Under each account meter SubSplit
+  divides the window's `used_percent` by how much of the window has gone — "on pace for ~118%
+  — hits 100% Thu ~2pm". It is a straight-line average, drawn only once a tenth of the window
+  has elapsed and only from the percentage, never from token counts.
 - **The fair-share guide sits at 100/N%.** With four members that is a line at 25% on
   every share bar. It is a reference mark, not a limit: SubSplit does not throttle anyone.
 - **Caveat worth internalising: OpenAI's `used_percent` is not proportional to raw

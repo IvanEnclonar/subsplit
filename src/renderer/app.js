@@ -7,6 +7,8 @@
  *   saveSettings(p) -> Promise<UiState>
  *   joinGroup(o)    -> Promise<UiState>
  *   refreshNow()    -> Promise<UiState>
+ *   copyInvite()    -> Promise<{ ok } | { ok: false, error }>
+ *   pasteInvite()   -> Promise<{ ok, serverUrl, tokenMasked } | { ok: false, error }>
  *   quit()          -> void
  *   onState(cb)     -> unsubscribe()
  *
@@ -57,6 +59,9 @@
     fToken: role('f-token'),
     fTokenHint: role('f-token-hint'),
     fName: role('f-name'),
+    pasteInviteBtn: document.querySelector('[data-action="paste-invite"]'),
+    copyInviteBtn: document.querySelector('[data-action="copy-invite"]'),
+    inviteNote: role('invite-note'),
     alerts: role('alerts'),
     fNotify: role('f-notify'),
     fNotifyWeekly: role('f-notify-weekly'),
@@ -136,6 +141,20 @@
     return sec + 's';
   }
 
+  // Local weekday + hour, e.g. "Thu ~2pm". No Intl formats beyond the weekday.
+  function fmtWhen(ms) {
+    var d = new Date(ms);
+    if (!isFinite(d.getTime())) return '';
+    var day;
+    try {
+      day = d.toLocaleDateString(undefined, { weekday: 'short' });
+    } catch (e) {
+      day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
+    }
+    var h = d.getHours();
+    return day + ' ~' + (h % 12 === 0 ? 12 : h % 12) + (h < 12 ? 'am' : 'pm');
+  }
+
   function fmtAgo(msAgo) {
     var s = Math.max(0, Math.round(msAgo / 1000));
     if (s < 5) return 'just now';
@@ -210,6 +229,8 @@
       group: s.group && typeof s.group === 'object' ? s.group : null,
       // Computed in the main process (src/main/capacity.js) — never here.
       capacity: s.capacity && typeof s.capacity === 'object' ? s.capacity : {},
+      // Likewise src/main/pace.js.
+      pace: s.pace && typeof s.pace === 'object' ? s.pace : {},
       sync: {
         lastSyncAt: sync.lastSyncAt == null ? null : Number(sync.lastSyncAt),
         error: sync.error && typeof sync.error === 'object' ? sync.error : null,
@@ -231,6 +252,19 @@
     var accountPct = Number(cap.accountPct);
     if (!isFinite(accountPct)) return null;
     return { accountPct: accountPct, members: cap.members };
+  }
+
+  // { projectedPct, hitsAtMs } for a window, or null when the main process
+  // could not project one (no gauge, stale snapshot, or too early to tell).
+  function paceFor(state, key) {
+    var p = state.pace ? state.pace[key] : null;
+    if (!p || typeof p !== 'object') return null;
+    var projected = Number(p.projectedPct);
+    if (!isFinite(projected)) return null;
+    return {
+      projectedPct: projected,
+      hitsAtMs: p.hitsAtMs == null ? null : toMs(p.hitsAtMs)
+    };
   }
 
   function memberCapacity(cap, member) {
@@ -336,6 +370,18 @@
   var formMode = 'onboard';// which flavour the shared form is showing
   var busy = { form: false, refresh: false };
   var ticking = [];        // [{ node, resetAt }]
+  // True once a pasted invite is loaded: the token itself stayed in the main
+  // process, so the form submits an empty token and main fills it back in.
+  var fromInvite = false;
+  var inviteServer = '';   // the URL that invite is good for, as main sees it
+  var noteTimer = null;
+
+  // Main matches a pending invite to the submitted URL canonically, and treats a
+  // trailing slash as the same server (src/main/invite.js). Mirror that here so
+  // the "from invite" state never claims a token main would refuse to use.
+  function sameServer(a, b) {
+    return String(a).trim().replace(/\/+$/, '') === String(b).trim().replace(/\/+$/, '');
+  }
 
   function setMode(next) {
     mode = next;
@@ -375,7 +421,12 @@
     dom.fServer.value = settings.serverUrl || '';
     dom.fName.value = settings.memberName || '';
     dom.fToken.value = '';
-    dom.fToken.placeholder = onboarding ? 'ss_…' : 'unchanged';
+    clearInvite();
+
+    // Paste an invite when joining; hand one out once you are in a group.
+    show(dom.pasteInviteBtn, onboarding);
+    show(dom.copyInviteBtn, !onboarding);
+    setInviteNote('');
 
     // Alerts are about your own share of a group you are already in.
     show(dom.alerts, !onboarding);
@@ -408,6 +459,56 @@
     return isFinite(n) && n >= 1 && n <= 100 ? n : null;
   }
 
+  /* ───────────────────────── invites ───────────────────────── */
+
+  function setInviteNote(message) {
+    if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+    dom.inviteNote.textContent = message || '';
+    if (message) {
+      noteTimer = setTimeout(function () {
+        noteTimer = null;
+        dom.inviteNote.textContent = '';
+      }, 2200);
+    }
+  }
+
+  function clearInvite() {
+    fromInvite = false;
+    inviteServer = '';
+    dom.fToken.classList.remove('is-invite');
+    dom.fToken.placeholder = formMode === 'onboard' ? 'ss_…' : 'unchanged';
+  }
+
+  function doPasteInvite() {
+    if (busy.form) return;
+    Promise.resolve(api.pasteInvite()).then(function (result) {
+      var res = result || {};
+      if (!res.ok) return setFormError(res.error || 'Could not read an invite from the clipboard.');
+      setFormError(null);
+      dom.fServer.value = res.serverUrl || '';
+      dom.fToken.value = '';
+      dom.fToken.placeholder = res.tokenMasked || 'from invite';
+      dom.fToken.classList.add('is-invite');
+      fromInvite = true;
+      inviteServer = res.serverUrl || '';
+      setInviteNote('Invite loaded');
+      dom.fName.focus();
+    }, function (err) {
+      setFormError(errMessage(err));
+    });
+  }
+
+  function doCopyInvite() {
+    Promise.resolve(api.copyInvite()).then(function (result) {
+      var res = result || {};
+      if (!res.ok) return setFormError(res.error || 'Could not copy the invite.');
+      setFormError(null);
+      setInviteNote('Copied!');
+    }, function (err) {
+      setFormError(errMessage(err));
+    });
+  }
+
   function setFormError(message) {
     if (!message) {
       dom.formError.textContent = '';
@@ -438,7 +539,7 @@
 
     if (!serverUrl) return setFormError('Enter the server URL your group is using.');
     if (!/^https?:\/\//i.test(serverUrl)) return setFormError('The server URL should start with http:// or https://.');
-    if (onboarding && !token) return setFormError('Paste the join token you were given (it starts with ss_).');
+    if (onboarding && !token && !fromInvite) return setFormError('Paste the join token you were given (it starts with ss_), or use Paste invite.');
     if (!memberName) return setFormError('Add a name so the rest of the group knows who you are.');
 
     setFormError(null);
@@ -577,7 +678,21 @@
     sub.appendChild(el('span', 'acct-note', known ? fmtTokens(total) + ' tokens' : 'group total'));
     row.appendChild(sub);
 
+    var pace = paceFor(state, key);
+    if (pace) row.appendChild(paceLine(pace));
+
     return row;
+  }
+
+  // "on pace for ~118% — hits 100% Thu ~2pm", or just the projection when the
+  // window is not heading for the limit.
+  function paceLine(pace) {
+    var over = pace.projectedPct >= 100;
+    var line = el('div', 'acct-pace' + (over ? ' is-warn' : ''));
+    var text = 'on pace for ~' + Math.round(pace.projectedPct) + '%';
+    if (pace.hitsAtMs != null) text += ' ' + EN_DASH + ' hits 100% ' + fmtWhen(pace.hitsAtMs);
+    line.textContent = text;
+    return line;
   }
 
   function renderMembers(state, primary) {
@@ -790,6 +905,19 @@
 
   function bind() {
     dom.form.addEventListener('submit', submitForm);
+
+    dom.pasteInviteBtn.addEventListener('click', doPasteInvite);
+    dom.copyInviteBtn.addEventListener('click', doCopyInvite);
+    // Typing a token by hand takes precedence over a pasted invite.
+    dom.fToken.addEventListener('input', function () {
+      if (fromInvite) clearInvite();
+    });
+    // An invite is only good for the server it came from. Pointing the form at a
+    // different one drops it, so the field stops advertising a token that main
+    // would decline to use; tidying the same URL up keeps it.
+    dom.fServer.addEventListener('input', function () {
+      if (fromInvite && !sameServer(dom.fServer.value, inviteServer)) clearInvite();
+    });
     dom.formBack.addEventListener('click', function () {
       if (!current || !current.configured) return;
       setMode('dash');
@@ -931,6 +1059,18 @@
           return clone(state);
         });
       },
+      copyInvite: function () {
+        return delay(150).then(function () { return { ok: true }; });
+      },
+      pasteInvite: function () {
+        return delay(150).then(function () {
+          return {
+            ok: true,
+            serverUrl: 'https://subsplit.example.workers.dev',
+            tokenMasked: 'ss_a1b2…(hidden)'
+          };
+        });
+      },
       quit: function () { console.info('[mock] quit()'); },
       onState: function (cb) {
         listeners.push(cb);
@@ -1053,6 +1193,15 @@
           members: { marcus: 18.8, 'alex-rivera': 8.6, priya: 3.7, bo: 0 }
         }
       },
+      // Also main's (src/main/pace.js), and likewise literals — but literals of
+      // what computePace returns for the snapshot above, or the harness stops
+      // being a reference. Weekly: 62% with 0.689 of the window gone -> 90%, no
+      // hit time. 5h: 31% with 0.26 gone -> 119%, reaching 100% at
+      // windowStart + elapsed x (100/31), i.e. ~174 min out.
+      pace: {
+        weekly: { projectedPct: 90, hitsAtMs: null, elapsedFraction: 0.69 },
+        '5h': { projectedPct: 119, hitsAtMs: now + 174 * 60e3, elapsedFraction: 0.26 }
+      },
       sync: { lastSyncAt: now - 42000, error: null, clockSkewMs: 180 }
     };
 
@@ -1063,6 +1212,7 @@
       state.settings.serverUrl = '';
       state.group = null;
       state.capacity = { weekly: null, '5h': null };
+      state.pace = { weekly: null, '5h': null };
       state.sync.lastSyncAt = null;
     } else if (scenario === 'solo') {
       state.group.members = [members[1]];
@@ -1073,6 +1223,19 @@
         weekly: { accountPct: 62, members: { 'alex-rivera': 62 } },
         '5h': { accountPct: 31, members: { 'alex-rivera': 31 } }
       };
+      // The hidden half of the feature: the 5h window is restarted 24 minutes
+      // ago, so at 0.08 elapsed it is below the 10% floor and computePace
+      // returns null — meter, no pace line. Weekly still projects, under 100%.
+      var soloFiveReset = now + 300 * 60e3 - 24 * 60e3;
+      state.group.account_rate_limit.windows.forEach(function (w) {
+        if (w.windowMinutes === 300) w.resetsAt = soloFiveReset;
+      });
+      state.local.windows['5h'].window_start = soloFiveReset - 300 * 60e3;
+      state.local.windows['5h'].resets_at = soloFiveReset;
+      state.pace = {
+        weekly: { projectedPct: 90, hitsAtMs: null, elapsedFraction: 0.69 },
+        '5h': null
+      };
     } else if (scenario === 'error') {
       state.sync.error = { code: 'network_error', message: 'Can’t reach the group server (ETIMEDOUT). Showing the last data received.' };
       state.sync.lastSyncAt = now - 11 * 60e3;
@@ -1080,8 +1243,9 @@
       state.local.windows = {};
       state.local.stats = { files: 0, newBytes: 0, badLines: 0, forkBaselines: 0 };
       state.group.account_rate_limit = null;
-      // No account gauge — no capacity, and no capacity UI.
+      // No account gauge — no capacity and no pace, so neither is rendered.
       state.capacity = { weekly: null, '5h': null };
+      state.pace = { weekly: null, '5h': null };
       state.group.members.forEach(function (m) {
         m.windows.weekly.used_percent = null;
         m.windows['5h'].used_percent = null;
@@ -1089,6 +1253,7 @@
     } else if (scenario === 'unsynced') {
       state.group = null;
       state.capacity = { weekly: null, '5h': null };
+      state.pace = { weekly: null, '5h': null };
       state.sync.lastSyncAt = null;
     }
 

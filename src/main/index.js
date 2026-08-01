@@ -6,7 +6,7 @@
 // and setLoginItemSettings' registry name derive from), then the single-instance
 // lock synchronously, before anything else happens.
 
-const { app, Menu, ipcMain, Notification } = require('electron');
+const { app, Menu, ipcMain, Notification, clipboard } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,7 +21,9 @@ const { createScanner } = require('./parser');
 const { computeWindows } = require('./windows');
 const { createSync, toErrorInfo } = require('./sync');
 const { computeCapacity } = require('./capacity');
+const { computePace } = require('./pace');
 const { evaluateAlerts } = require('./notify');
+const { buildInvite, parseInvite, maskToken, canonicalServerUrl } = require('./invite');
 
 // ---------------------------------------------------------------------------
 // constants
@@ -41,6 +43,8 @@ const IPC_CHANNELS = {
   settingsSave: 'settings:save',
   groupJoin: 'group:join',
   syncRefresh: 'sync:refresh',
+  inviteCopy: 'invite:copy',
+  invitePaste: 'invite:paste',
   appQuit: 'app:quit',
 };
 const STATE_CHANGED = 'state:changed';
@@ -68,6 +72,9 @@ const state = {
   skipNextPoll: false,
   pollIntervalMs: POLL_INTERVAL_MS,
   loginItemEnabled: false,
+  // { serverUrl, joinToken } parsed from a pasted invite. Main-process only:
+  // it is never put in a UiState, an IPC reply, or a log line.
+  pendingInvite: null,
 };
 
 let scanner = null;
@@ -549,8 +556,19 @@ async function refreshNow() {
 async function joinGroup(input) {
   const opts = input || {};
   const serverUrl = typeof opts.serverUrl === 'string' ? opts.serverUrl.trim() : '';
-  const joinToken = typeof opts.joinToken === 'string' ? opts.joinToken.trim() : '';
+  const typedToken = typeof opts.joinToken === 'string' ? opts.joinToken.trim() : '';
   const memberName = typeof opts.memberName === 'string' ? opts.memberName.trim() : '';
+
+  // An empty token plus a pasted invite for this very server means "use the
+  // invite" — the renderer was never given the token to send back. Compared
+  // canonically, because `https://x.dev/` and `https://x.dev` are the same
+  // server everywhere else (joinUrl in sync.js) and a user tidying up the URL
+  // field must not silently lose their invite. A URL that canonicalizes to
+  // nothing never matches, so the token cannot follow the field elsewhere.
+  const invitedFor = state.pendingInvite ? canonicalServerUrl(state.pendingInvite.serverUrl) : null;
+  const submittedFor = canonicalServerUrl(serverUrl);
+  const invited = Boolean(!typedToken && invitedFor && submittedFor && invitedFor === submittedFor);
+  const joinToken = invited ? state.pendingInvite.joinToken : typedToken;
 
   let result;
   try {
@@ -574,6 +592,8 @@ async function joinGroup(input) {
         : memberName,
     memberId: result.member_id,
   });
+  // Consumed. A failed join keeps it, so the user can fix their name and retry.
+  state.pendingInvite = null;
   // New group: previous group state and etag are meaningless.
   state.group = null;
   state.etag = null;
@@ -621,6 +641,7 @@ function buildUiState() {
     group: state.group,
     // Computed here so the formula lives in exactly one place.
     capacity: computeCapacity(state.group),
+    pace: computePace(state.group, Date.now()),
     sync: {
       lastSyncAt: state.lastSyncAt,
       error: state.syncError,
@@ -770,6 +791,81 @@ function rendererIndexPath() {
   return path.join(__dirname, '..', 'renderer', 'index.html');
 }
 
+/**
+ * macOS: an LSUIElement app still needs an application menu, because that is
+ * where Cmd+C/V/X/A live. Without one, nothing in the popover can be pasted
+ * into. Minimal on purpose — no File, no View.
+ */
+function setupApplicationMenu() {
+  if (process.platform !== 'darwin') return;
+  try {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { type: 'separator' },
+            { role: 'selectAll' },
+          ],
+        },
+      ])
+    );
+  } catch (err) {
+    console.error('[subsplit] could not install the application menu:', (err && err.message) || err);
+  }
+}
+
+// Windows/Linux: the popover is frameless, so there is no menu to host the
+// standard editing accelerators. On macOS the application menu above already
+// handles them, and this stays a no-op so nothing fires twice.
+const NEEDS_EDIT_ACCELERATORS = process.platform !== 'darwin';
+const EDIT_ACCELERATORS = { v: 'paste', c: 'copy', x: 'cut', a: 'selectAll' };
+
+function handleEditAccelerator(event, input, contents) {
+  if (!NEEDS_EDIT_ACCELERATORS) return;
+  if (!input || input.type !== 'keyDown') return;
+  if (!input.control || input.alt || input.meta || input.shift) return;
+  const action = EDIT_ACCELERATORS[String(input.key || '').toLowerCase()];
+  if (!action) return;
+  event.preventDefault();
+  try {
+    contents[action]();
+  } catch (err) {
+    console.error(`[subsplit] ${action} failed:`, (err && err.message) || err);
+  }
+}
+
+/**
+ * Native right-click menu for editable fields (and text selections). Roles, so
+ * the behaviour is the platform's own. Nothing to offer -> no menu at all.
+ */
+function popoverContextMenu(params) {
+  const p = params || {};
+  const flags = p.editFlags || {};
+  let template = null;
+
+  if (p.isEditable) {
+    template = [
+      { role: 'cut', enabled: Boolean(flags.canCut) },
+      { role: 'copy', enabled: Boolean(flags.canCopy) },
+      { role: 'paste', enabled: Boolean(flags.canPaste) },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: flags.canSelectAll !== false },
+    ];
+  } else if (typeof p.selectionText === 'string' && p.selectionText.trim()) {
+    template = [{ role: 'copy', enabled: flags.canCopy !== false }];
+  }
+
+  return template ? Menu.buildFromTemplate(template) : null;
+}
+
 function createPopover() {
   const win = trayModule.createPopoverWindow({
     preload: path.join(__dirname, '..', 'preload', 'preload.js'),
@@ -789,7 +885,36 @@ function createPopover() {
     broadcast();
   });
 
-  trayModule.attachAutoHide(win);
+  win.webContents.on('before-input-event', (event, input) => {
+    handleEditAccelerator(event, input, win.webContents);
+  });
+
+  // The auto-hide below is suspended while this menu is up: popping it blurs
+  // the popover, and a hidden popover has nowhere to paste into.
+  let menuOpen = false;
+  win.webContents.on('context-menu', (_event, params) => {
+    const menu = popoverContextMenu(params);
+    if (!menu) return;
+    menuOpen = true;
+    try {
+      menu.popup({
+        window: win,
+        callback: () => {
+          // Fires on cancel (Escape, a click elsewhere) as much as on a pick, so
+          // raising the window here would drag an always-on-top panel back over
+          // whatever the user just clicked to dismiss the menu. Only put the
+          // caret back where it was; the suspended auto-hide re-checks itself.
+          menuOpen = false;
+          if (!win.isDestroyed() && win.isFocused()) win.webContents.focus();
+        },
+      });
+    } catch (err) {
+      menuOpen = false;
+      console.error('[subsplit] could not open the context menu:', (err && err.message) || err);
+    }
+  });
+
+  trayModule.attachAutoHide(win, { shouldHide: () => !menuOpen });
 
   const indexFile = rendererIndexPath();
   win.loadFile(indexFile).catch((err) => {
@@ -948,6 +1073,42 @@ function registerIpc() {
 
   handle(IPC_CHANNELS.syncRefresh, () => refreshNow());
 
+  // Invites: both halves are built and parsed here, so the join token stays in
+  // the main process. The renderer only ever sees { ok } / a masked token.
+  handle(IPC_CHANNELS.inviteCopy, () => {
+    const invite = buildInvite({
+      serverUrl: state.settings.serverUrl,
+      joinToken: state.settings.joinToken,
+    });
+    if (!invite) {
+      return { ok: false, error: 'There is no group to invite anyone to yet.' };
+    }
+    try {
+      clipboard.writeText(invite);
+    } catch (err) {
+      console.error('[subsplit] could not write the invite:', (err && err.message) || err);
+      return { ok: false, error: 'Could not write to the clipboard.' };
+    }
+    return { ok: true };
+  });
+
+  handle(IPC_CHANNELS.invitePaste, () => {
+    let text = '';
+    try {
+      text = clipboard.readText() || '';
+    } catch (_err) {
+      text = '';
+    }
+    const parsed = parseInvite(text);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    state.pendingInvite = { serverUrl: parsed.serverUrl, joinToken: parsed.joinToken };
+    return {
+      ok: true,
+      serverUrl: parsed.serverUrl,
+      tokenMasked: maskToken(parsed.joinToken),
+    };
+  });
+
   handle(IPC_CHANNELS.appQuit, () => {
     quitApp();
     return null;
@@ -1034,6 +1195,7 @@ function bootstrap() {
     const roots = codexRoots();
     scanner = createScanner({ roots, cache: settingsStore.loadCache() });
 
+    setupApplicationMenu();
     popover = createPopover();
     registerIpc();
     setupTray();
@@ -1073,5 +1235,17 @@ module.exports = {
     rebuildSyncClient,
     maybePush,
     pollNow,
+    joinGroup,
+    // joinGroup arms the poll timer; a test process has to be able to stop it.
+    stopTimers() {
+      if (pollTimer) clearInterval(pollTimer);
+      if (safetyTimer) clearInterval(safetyTimer);
+      if (state.pushTimer) clearTimeout(state.pushTimer);
+      if (rescanTimer) clearTimeout(rescanTimer);
+      pollTimer = null;
+      safetyTimer = null;
+      state.pushTimer = null;
+      rescanTimer = null;
+    },
   },
 };

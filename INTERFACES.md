@@ -27,6 +27,8 @@ src/main/tray.js       tray creation + popover positioning (exported helpers)
 src/main/parser.js     Codex rollout parser (incremental)  ← crown jewel
 src/main/windows.js    window bucketing (5h / weekly totals from deltas + rate snapshot)
 src/main/capacity.js   capacity share (a member's slice of the ACCOUNT limit) — pure
+src/main/pace.js       "at this rate" projection for the account windows — pure
+src/main/invite.js     one-paste invite blob: build / parse / mask — pure
 src/main/notify.js     usage-alert rules + latch (decides, never fires) — pure
 src/main/sync.js       server client (join / push / poll)
 src/main/settings.js   settings + cache persistence in app.getPath('userData')
@@ -109,6 +111,61 @@ computeCapacity(groupState) // ->
   `null`, or the group total for that window is 0 (never divide by zero). Member percentages
   are clamped to `[0, accountPct]`, so they always sum to `accountPct`.
 - Pure: no Electron, no I/O, never throws on malformed input.
+
+## pace.js
+
+```js
+const { computePace } = require('./pace');
+computePace(groupState, nowMs) // ->
+// { "5h": Pace | null, "weekly": Pace | null }
+// Pace = { projectedPct: number, hitsAtMs: number|null, elapsedFraction: number }
+```
+
+- **Pace** = where a window lands if consumption keeps its current average:
+  `projectedPct = used_percent / elapsedFraction`, capped at **999** for display sanity and
+  **rounded to a whole number here**, once — the renderer prints it, tints on it and derives
+  the hit clause from it, so an unrounded value would let 99.6 print as "~100%" with no
+  warning and no hit time.
+- `elapsedFraction = (now - (resets_at - w)) / w`, clamped to `[0, 1]`.
+- A window is `null` unless the account snapshot has an entry for it with a numeric
+  `used_percent` **and** a `resets_at` still in the future (a stale snapshot describes a
+  window that already rolled over — see windows.js), `elapsedFraction >= 0.10` (early-window
+  noise), and `used_percent > 0`.
+- `hitsAtMs = window_start + elapsed × (100 / used_percent)` when `projectedPct >= 100`, else
+  `null`; when `used_percent` is already `>= 100` it is `nowMs`.
+- Projects **percent from percent only** — token counts are metered on a formula OpenAI does
+  not publish, so they never enter this maths.
+- Reaches the renderer as `UiState.pace`; the renderer must never recompute it.
+- Pure: no Electron, no I/O, never throws on malformed input.
+
+## invite.js
+
+```js
+const { buildInvite, parseInvite, maskToken, canonicalServerUrl } = require('./invite');
+buildInvite({ serverUrl, joinToken })  // -> "subsplit1-<base64url(JSON)>" | null
+parseInvite(text)                      // -> { ok: true, serverUrl, joinToken }
+                                       //  | { ok: false, error: string }
+maskToken(token)                       // -> "ss_ab12…(hidden)"
+canonicalServerUrl(value)              // -> normalized url string | null
+```
+
+- Invite = one chat-safe token `subsplit1-<base64url(JSON)>`, JSON `{ u: serverUrl, t: joinToken }`.
+  The version prefix is **mandatory**.
+- `parseInvite` tolerates the blob being embedded in surrounding text (regex extraction, and a
+  prefix glued to other word characters does not match). It reads at most **8KB** of clipboard
+  text and a **2KB** blob, requires `u` to be a syntactically valid http(s) URL of ≤ **512**
+  chars, and `t` to match the grammar the server enforces (`parseBearer` in `server/core.js`:
+  `ss_<4-32 [a-z0-9]>_<16-128 base64url>`). A payload carrying `__proto__` / `constructor` /
+  `prototype` keys is rejected whole.
+- `canonicalServerUrl` is the **only** URL gate, used by both halves: it rejects a URL carrying
+  credentials (`https://looks-like-us.example@evil.example` connects to `evil.example` while
+  reading as ours in a 360px field — the invite blob is opaque, so this host is the only thing
+  a joiner gets to check) and returns the string **re-derived from the parsed URL**, trailing
+  slashes trimmed as `joinUrl` trims them, so what is validated is what is stored, compared and
+  requested. One server is therefore always one string.
+- Everything else fails with a friendly `error` string. It never throws, and `buildInvite`
+  returns `null` rather than emitting a half-built invite.
+- Pure: no Electron, no I/O. The clipboard itself is touched only by index.js.
 
 ## notify.js
 
@@ -212,6 +269,8 @@ Preload exposes `window.subsplit`:
   saveSettings(partial): Promise<UiState>,
   joinGroup({ serverUrl, joinToken, memberName }): Promise<UiState>,  // join + persist + immediate push/poll
   refreshNow(): Promise<UiState>,     // rescan + push + poll
+  copyInvite(): Promise<{ ok: true } | { ok: false, error }>,
+  pasteInvite(): Promise<{ ok: true, serverUrl, tokenMasked } | { ok: false, error }>,
   quit(): void,
   onState(cb): unsubscribeFn,         // main → renderer push on every state change
 }
@@ -223,16 +282,33 @@ Preload exposes `window.subsplit`:
 //   local: { windows: computeWindows() result, lastScanAt, stats },
 //   group: GroupState | null,
 //   capacity: computeCapacity(group) result,   // { "5h": CapacityWindow|null, "weekly": … }
+//   pace: computePace(group, now) result,      // { "5h": Pace|null, "weekly": Pace|null }
 //   sync: { lastSyncAt: ms|null, error: {code,message}|null, clockSkewMs: number|null },
 // }
 ```
+
+**Invites.** `copyInvite()` takes no argument: main builds the blob from its own
+`serverUrl` + `joinToken` and writes it with `electron.clipboard.writeText`, returning only
+`{ ok: true }`. `pasteInvite()` has main read `electron.clipboard.readText` (bounded), parse
+and validate it (invite.js), stash the token in a main-process `pendingInvite`, and answer
+with the server URL plus a **masked** token — the raw token is in neither reply. When
+`joinGroup` is called with an empty `joinToken` while a `pendingInvite` whose `serverUrl`
+matches the submitted one exists, main uses the pending token. The match is on
+`canonicalServerUrl` of both sides, never raw strings: a trailing slash is the same server
+everywhere else, and a mismatch there would send the join out tokenless. Anything that
+canonicalizes to `null` matches nothing, so the token cannot follow the URL field to another
+host. It is cleared on a successful
+join and kept after a failed one, so the user can fix their name and retry. Typing in the
+token field clears the invite state in the renderer, which then submits the typed token as
+before.
 
 `saveSettings(partial)` also accepts `notifyEnabled` (boolean) and `notifyPct` (both windows,
 `null` = AUTO); the preload allow-list passes nothing else through. UiState fields are not
 filtered anywhere between `buildUiState()` and the renderer — whatever is added there arrives
 whole, so the token must simply never be put in it.
 
-Channels (ipcMain.handle): `state:get`, `settings:save`, `group:join`, `sync:refresh`, `app:quit`.
+Channels (ipcMain.handle): `state:get`, `settings:save`, `group:join`, `sync:refresh`,
+`invite:copy`, `invite:paste`, `app:quit`.
 Event (webContents.send): `state:changed` with UiState.
 Security: contextIsolation + sandbox stay at defaults, never expose ipcRenderer itself,
 validate channel senders, CSP `script-src 'self'` meta in index.html,
@@ -260,17 +336,40 @@ validate channel senders, CSP `script-src 'self'` meta in index.html,
   `Notification.isSupported()`; persist `prunedLatch` through `settings.js`. Never while
   `sync.error` is set. `app.setAppUserModelId` must stay the first line — Windows toasts
   need it.
+- Editing: an LSUIElement tray app still needs Cmd+C/V/X/A, so macOS gets a minimal
+  application menu at startup (`appMenu` + an Edit menu of standard roles; no File, no View).
+  Both platforms get a native `context-menu` handler on the popover's webContents — Cut/Copy/
+  Paste/Select All for `params.isEditable` (enabled per `params.editFlags`), Copy alone for a
+  non-editable selection, and no menu at all otherwise. `Menu.popup` blurs the popover, so the
+  auto-hide is suspended while the menu is up (`attachAutoHide(win, { shouldHide })`) — the
+  pending hide is **re-armed, not dropped**, since nothing else re-evaluates it once the menu
+  closes and a blurred popover left on screen shows the whole group's usage. The popup callback
+  fires on cancel as much as on a pick, so it never raises the window (that would drag an
+  always-on-top panel back over whatever the user clicked to dismiss the menu); it only restores
+  the caret, and only while the window is still focused.
+  Windows/Linux have no menu to host accelerators: a `before-input-event` handler maps
+  Ctrl+V/C/X/A on `keyDown` to `webContents.paste()/copy()/cut()/selectAll()` and is a no-op on
+  macOS, where the application menu already handles them. Nothing else is intercepted.
 - `app.dock?.hide()`, `requestSingleInstanceLock`, `app.setAppUserModelId('app.subsplit')` first line.
 
 ## Renderer views
 
 1. **Onboarding** (when `!configured`): fields Server URL, Join token, Your name → Join
-   button → `joinGroup`. Friendly error line under the form. In **settings** mode the same
+   button → `joinGroup`. Friendly error line under the form. A **Paste invite** button fills
+   Server URL, shows the masked token in the token field with a "from invite" state, and
+   focuses the name field; submitting then sends an empty token. Typing in the token field
+   drops that state, and so does editing the Server URL to a *different* server — the renderer
+   mirrors main's canonical match (trailing slashes ignored), so the field never advertises a
+   token main would then decline to use. In **settings** mode the token field instead offers **Copy invite**
+   (`copyInvite`) with a transient "Copied!" confirmation. In **settings** mode the same
    form also shows an "Usage alerts" block: enable toggle + a numeric input per window,
    placeholder "auto (fair share)", helper text naming what auto currently equals. An empty
    input means `null` (AUTO). Saved through `saveSettings`.
 2. **Dashboard**: account header — one bar per available window ("Weekly", "5h") with
-   account-wide used% + "resets in Xh Ym"; member list sorted by weekly total desc — name,
+   account-wide used% + "resets in Xh Ym", and under it the pace line from `UiState.pace`
+   ("on pace for ~118% — hits 100% Thu ~2pm", weekday+hour in local time; no hit clause below
+   100%; warn-tinted at ≥ 100%; hidden entirely when that window's pace is `null`);
+   member list sorted by weekly total desc — name,
    token count (compact: 1.3M), share bar + share %, "you" badge, stale-device dot;
    footer — last synced, refresh button, gear (back to settings), quit.
    Fair-share guide line at 100/N % on share bars. Each row also shows its **capacity

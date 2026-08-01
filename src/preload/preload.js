@@ -12,6 +12,8 @@ const CHANNEL_STATE_GET = 'state:get';
 const CHANNEL_SETTINGS_SAVE = 'settings:save';
 const CHANNEL_GROUP_JOIN = 'group:join';
 const CHANNEL_SYNC_REFRESH = 'sync:refresh';
+const CHANNEL_INVITE_COPY = 'invite:copy';
+const CHANNEL_INVITE_PASTE = 'invite:paste';
 const CHANNEL_APP_QUIT = 'app:quit';
 const CHANNEL_STATE_CHANGED = 'state:changed';
 
@@ -77,6 +79,25 @@ const api = {
   /** refreshNow(): Promise<UiState> */
   refreshNow() {
     return ipcRenderer.invoke(CHANNEL_SYNC_REFRESH);
+  },
+
+  /**
+   * copyInvite(): Promise<{ ok: true } | { ok: false, error }>
+   * Main builds the invite from its own settings and writes it to the
+   * clipboard: no argument goes in, and no token comes back.
+   */
+  copyInvite() {
+    return ipcRenderer.invoke(CHANNEL_INVITE_COPY);
+  },
+
+  /**
+   * pasteInvite(): Promise<{ ok: true, serverUrl, tokenMasked } |
+   *                        { ok: false, error }>
+   * Main reads and parses the clipboard, keeps the token, and answers with a
+   * masked stand-in for it.
+   */
+  pasteInvite() {
+    return ipcRenderer.invoke(CHANNEL_INVITE_PASTE);
   },
 
   /** quit(): void */

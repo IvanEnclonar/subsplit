@@ -349,9 +349,12 @@ function createPopoverWindow(options) {
 /**
  * Hide on blur, with a 100ms grace period so that clicking the tray icon while
  * the popover is open reads as a toggle instead of blur-then-reopen.
- * Returns a disposer.
+ * `options.shouldHide` is consulted just before hiding — a native context menu
+ * blurs the popover, and hiding the window out from under an open menu would
+ * make right-click → Paste unusable. Returns a disposer.
  */
-function attachAutoHide(win) {
+function attachAutoHide(win, options) {
+  const shouldHide = options && typeof options.shouldHide === 'function' ? options.shouldHide : null;
   let timer = null;
   const cancel = () => {
     if (timer) {
@@ -359,12 +362,22 @@ function attachAutoHide(win) {
       timer = null;
     }
   };
+  const check = () => {
+    timer = null;
+    if (win.isDestroyed()) return;
+    // Suspended (a native menu is up). Re-arm rather than drop the hide: only a
+    // fresh focus/blur cycle would ever ask again, so a popover blurred behind a
+    // context menu would otherwise stay on screen — with everyone's usage on it —
+    // until the user happened to focus it again.
+    if (shouldHide && !shouldHide()) {
+      timer = setTimeout(check, 100);
+      return;
+    }
+    if (!win.isFocused()) win.hide();
+  };
   const onBlur = () => {
     cancel();
-    timer = setTimeout(() => {
-      timer = null;
-      if (!win.isDestroyed() && !win.isFocused()) win.hide();
-    }, 100);
+    timer = setTimeout(check, 100);
   };
   win.on('blur', onBlur);
   win.on('show', cancel);

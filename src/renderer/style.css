@@ -373,6 +373,30 @@ input { font: inherit; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* invites: one chat-safe code carries the server URL and the join token */
+
+.invite-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 1px;
+  min-height: 20px;
+}
+
+.invite-note {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* The token itself never reaches this window: the field shows a masked stand-in
+   as its placeholder, and typing anything drops back to a normal field. */
+.input.is-invite {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.input.is-invite::placeholder { color: var(--text-2); }
+
 /* usage alerts block (settings) */
 
 /* --bg, not --surface: the inputs inside are --surface, and they need the same
@@ -545,6 +569,15 @@ input { font: inherit; }
 }
 
 .acct-sub .acct-note { font-variant-numeric: normal; }
+
+/* "at this rate" — subordinate to the resets-in caption above it. */
+.acct-pace {
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-pace.is-warn { color: var(--warm); }
 
 /* ───────────────────────── member list ───────────────────────── */
 

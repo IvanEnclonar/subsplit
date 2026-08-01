@@ -584,3 +584,112 @@ test('UiState carries the capacity share, and still never the join token', () =>
   assert.strictEqual(ui.settings.joinToken, undefined, 'the token never reaches the renderer');
   assert.ok(!JSON.stringify(ui).includes(TOKEN));
 });
+
+test('joinGroup spends a pending invite, and its token stays out of UiState', async (t) => {
+  const main = loadMain();
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    main.stopTimers();
+  });
+
+  const INVITE_SERVER = 'https://invited.example.test';
+  const INVITE_TOKEN = 'ss_a1b2c3d4e5_Zm9vYmFyYmF6cXV4MTIzNA';
+  const seen = [];
+
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, init });
+    if (String(url).endsWith('/v1/join')) {
+      return makeResponse({
+        status: 200,
+        body: { group_id: 'a1b2c3d4e5', member_id: 'ada', member_name: 'Ada', poll_interval_s: 60 },
+      });
+    }
+    return makeResponse({ status: 200, body: { accepted: true, state: GROUP_STATE } });
+  };
+
+  main.state.pendingInvite = { serverUrl: INVITE_SERVER, joinToken: INVITE_TOKEN };
+
+  // The renderer never had the token, so it submits an empty one.
+  await main.joinGroup({ serverUrl: INVITE_SERVER, joinToken: '', memberName: 'Ada' });
+
+  assert.strictEqual(
+    seen[0].init.headers.Authorization,
+    `Bearer ${INVITE_TOKEN}`,
+    'the invite token authenticated the join'
+  );
+  assert.strictEqual(main.state.settings.joinToken, INVITE_TOKEN, 'and was then persisted');
+  assert.strictEqual(main.state.pendingInvite, null, 'a spent invite is not kept around');
+
+  const ui = main.buildUiState();
+  assert.ok(!JSON.stringify(ui).includes(INVITE_TOKEN), 'the token never reaches the renderer');
+});
+
+test('a pending invite for a different server is not used', async (t) => {
+  const main = loadMain();
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    main.stopTimers();
+  });
+
+  const INVITE_TOKEN = 'ss_a1b2c3d4e5_Zm9vYmFyYmF6cXV4MTIzNA';
+  main.state.pendingInvite = {
+    serverUrl: 'https://invited.example.test',
+    joinToken: INVITE_TOKEN,
+  };
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, init });
+    return makeResponse({ status: 401, body: {} });
+  };
+
+  // Specifically 'config': the join must fail for want of a token, not by being
+  // sent to the wrong host and rejected there. Accepting 'unauthorized' too
+  // would pass with the serverUrl guard deleted.
+  await assert.rejects(
+    () => main.joinGroup({ serverUrl: 'https://elsewhere.example.test', joinToken: '', memberName: 'Ada' }),
+    (err) => err.code === 'config'
+  );
+  assert.deepStrictEqual(seen, [], 'no request is made at all, so the token cannot leak');
+  assert.ok(main.state.pendingInvite, 'a failed join keeps the invite for a retry');
+});
+
+test('a pending invite survives a cosmetic edit to the server URL', async (t) => {
+  const main = loadMain();
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    main.stopTimers();
+  });
+
+  const INVITE_TOKEN = 'ss_a1b2c3d4e5_Zm9vYmFyYmF6cXV4MTIzNA';
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, init });
+    if (String(url).endsWith('/v1/join')) {
+      return makeResponse({
+        status: 200,
+        body: { group_id: 'a1b2c3d4e5', member_id: 'ada', member_name: 'Ada', poll_interval_s: 60 },
+      });
+    }
+    return makeResponse({ status: 200, body: { accepted: true, state: GROUP_STATE } });
+  };
+
+  main.state.pendingInvite = {
+    serverUrl: 'https://invited.example.test',
+    joinToken: INVITE_TOKEN,
+  };
+
+  // Same server, typed with the trailing slash the admin's message had. Every
+  // request built from either spelling is byte-identical (joinUrl in sync.js),
+  // so the invite must not be dropped over it.
+  await main.joinGroup({
+    serverUrl: 'https://invited.example.test/',
+    joinToken: '',
+    memberName: 'Ada',
+  });
+
+  assert.strictEqual(seen[0].init.headers.Authorization, `Bearer ${INVITE_TOKEN}`);
+  assert.strictEqual(main.state.pendingInvite, null, 'and it is spent');
+});

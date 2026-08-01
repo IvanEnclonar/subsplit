@@ -50,6 +50,11 @@
             <label class="field-label" for="f-token">Join token</label>
             <input class="input" id="f-token" data-role="f-token" type="password"
                    placeholder="ss_…" spellcheck="false" autocomplete="off" />
+            <div class="invite-row">
+              <button type="button" class="btn btn-ghost btn-sm" data-action="paste-invite" hidden>Paste invite</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="copy-invite" hidden>Copy invite</button>
+              <span class="invite-note" data-role="invite-note"></span>
+            </div>
             <p class="field-hint" data-role="f-token-hint" hidden>Leave blank to keep the token you already have.</p>
           </div>
 
