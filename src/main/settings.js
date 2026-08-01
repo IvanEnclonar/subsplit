@@ -7,7 +7,8 @@
 // when we are demonstrably running inside Electron, and every entry point accepts
 // an optional `dir` override (plus a process-wide `init({ baseDir })`).
 //
-// settings.json  { memberName, serverUrl, joinToken, memberId, deviceId, seq, primaryWindow }
+// settings.json  { memberName, serverUrl, joinToken, memberId, deviceId, seq, primaryWindow,
+//                  notifyEnabled, notifyPct, notifyLatch }
 // cache.json     scanner cache from parser.getCache() — written debounced, never
 //                more often than once per CACHE_MIN_INTERVAL_MS.
 
@@ -21,6 +22,7 @@ const CACHE_FILE = 'cache.json';
 const CACHE_MIN_INTERVAL_MS = 5000;
 
 const PRIMARY_WINDOWS = ['weekly', '5h'];
+const NOTIFY_WINDOWS = ['5h', 'weekly'];
 
 let baseDirOverride = null;
 
@@ -117,11 +119,38 @@ function defaultSettings() {
     deviceId: '',
     seq: 0,
     primaryWindow: 'weekly',
+    // Usage alerts. `notifyPct[key] === null` means AUTO — the fair share,
+    // 100/N, resolved at evaluation time because N changes as people join.
+    notifyEnabled: true,
+    notifyPct: { '5h': null, weekly: null },
+    // Internal: which alerts have already fired. { latchKey: resetsAt(ms) }.
+    notifyLatch: {},
   };
 }
 
 function str(value) {
   return typeof value === 'string' ? value : '';
+}
+
+/** An alert threshold is an integer 1..100; anything else means AUTO (null). */
+function notifyPct(raw) {
+  const out = { '5h': null, weekly: null };
+  if (!raw || typeof raw !== 'object') return out;
+  for (const key of NOTIFY_WINDOWS) {
+    const value = Number(raw[key]);
+    if (Number.isInteger(value) && value >= 1 && value <= 100) out[key] = value;
+  }
+  return out;
+}
+
+function notifyLatch(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const key of Object.keys(raw)) {
+    const resetsAt = Number(raw[key]);
+    if (Number.isFinite(resetsAt) && resetsAt > 0) out[key] = resetsAt;
+  }
+  return out;
 }
 
 function normalizeSettings(raw) {
@@ -135,6 +164,9 @@ function normalizeSettings(raw) {
   const seq = Number(raw.seq);
   out.seq = Number.isFinite(seq) && seq > 0 ? Math.floor(seq) : 0;
   out.primaryWindow = PRIMARY_WINDOWS.includes(raw.primaryWindow) ? raw.primaryWindow : 'weekly';
+  out.notifyEnabled = typeof raw.notifyEnabled === 'boolean' ? raw.notifyEnabled : true;
+  out.notifyPct = notifyPct(raw.notifyPct);
+  out.notifyLatch = notifyLatch(raw.notifyLatch);
   return out;
 }
 

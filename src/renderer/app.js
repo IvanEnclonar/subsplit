@@ -57,6 +57,11 @@
     fToken: role('f-token'),
     fTokenHint: role('f-token-hint'),
     fName: role('f-name'),
+    alerts: role('alerts'),
+    fNotify: role('f-notify'),
+    fNotifyWeekly: role('f-notify-weekly'),
+    fNotify5h: role('f-notify-5h'),
+    fNotifyHint: role('f-notify-hint'),
     formError: role('form-error'),
     formSubmit: role('form-submit'),
     formBack: document.querySelector('[data-action="form-back"]'),
@@ -185,6 +190,7 @@
     var settings = s.settings && typeof s.settings === 'object' ? s.settings : {};
     var local = s.local && typeof s.local === 'object' ? s.local : {};
     var sync = s.sync && typeof s.sync === 'object' ? s.sync : {};
+    var pct = settings.notifyPct && typeof settings.notifyPct === 'object' ? settings.notifyPct : {};
     return {
       configured: !!s.configured,
       settings: {
@@ -192,7 +198,9 @@
         // The id is what isYou() matches on — names are not unique.
         memberId: settings.memberId || null,
         serverUrl: settings.serverUrl || '',
-        primaryWindow: settings.primaryWindow === '5h' ? '5h' : 'weekly'
+        primaryWindow: settings.primaryWindow === '5h' ? '5h' : 'weekly',
+        notifyEnabled: settings.notifyEnabled !== false,
+        notifyPct: { weekly: pctOrNull(pct.weekly), '5h': pctOrNull(pct['5h']) }
       },
       local: {
         windows: local.windows && typeof local.windows === 'object' ? local.windows : {},
@@ -200,12 +208,35 @@
         stats: local.stats && typeof local.stats === 'object' ? local.stats : null
       },
       group: s.group && typeof s.group === 'object' ? s.group : null,
+      // Computed in the main process (src/main/capacity.js) — never here.
+      capacity: s.capacity && typeof s.capacity === 'object' ? s.capacity : {},
       sync: {
         lastSyncAt: sync.lastSyncAt == null ? null : Number(sync.lastSyncAt),
         error: sync.error && typeof sync.error === 'object' ? sync.error : null,
         clockSkewMs: sync.clockSkewMs == null ? null : Number(sync.clockSkewMs)
       }
     };
+  }
+
+  function pctOrNull(value) {
+    var n = Number(value);
+    return isFinite(n) && n >= 1 && n <= 100 ? Math.round(n) : null;
+  }
+
+  // { accountPct, members: { id: pct } } for a window, or null when the main
+  // process could not compute one (no account gauge, or nothing used yet).
+  function capacityFor(state, key) {
+    var cap = state.capacity ? state.capacity[key] : null;
+    if (!cap || typeof cap !== 'object' || !cap.members || typeof cap.members !== 'object') return null;
+    var accountPct = Number(cap.accountPct);
+    if (!isFinite(accountPct)) return null;
+    return { accountPct: accountPct, members: cap.members };
+  }
+
+  function memberCapacity(cap, member) {
+    if (!cap) return null;
+    var value = cap.members[member.member_id];
+    return value == null || !isFinite(Number(value)) ? null : Number(value);
   }
 
   function membersOf(state) {
@@ -346,8 +377,35 @@
     dom.fToken.value = '';
     dom.fToken.placeholder = onboarding ? 'ss_…' : 'unchanged';
 
+    // Alerts are about your own share of a group you are already in.
+    show(dom.alerts, !onboarding);
+    if (!onboarding) fillAlerts();
+
     setFormError(null);
     setFormBusy(false);
+  }
+
+  function fillAlerts() {
+    var settings = current ? current.settings : { notifyEnabled: true, notifyPct: {} };
+    var pct = settings.notifyPct || {};
+
+    dom.fNotify.checked = settings.notifyEnabled !== false;
+    dom.fNotifyWeekly.value = pct.weekly == null ? '' : String(pct.weekly);
+    dom.fNotify5h.value = pct['5h'] == null ? '' : String(pct['5h']);
+
+    var count = current ? membersOf(current).length : 0;
+    var auto = count > 0 ? Math.round(100 / count) : null;
+    dom.fNotifyHint.textContent = auto == null
+      ? 'Leave a box empty for auto — your fair share of the account limit.'
+      : 'Leave a box empty for auto, which is ' + auto + '% right now (' + count +
+        (count === 1 ? ' member).' : ' members).');
+  }
+
+  function readAlertInput(input) {
+    var raw = input.value.trim();
+    if (!raw) return null;
+    var n = Math.round(Number(raw));
+    return isFinite(n) && n >= 1 && n <= 100 ? n : null;
   }
 
   function setFormError(message) {
@@ -407,7 +465,16 @@
 
   // saveSettings takes a partial: omitting joinToken keeps the stored token.
   function buildSettingsPatch(serverUrl, memberName, token) {
-    var patch = { serverUrl: serverUrl, memberName: memberName };
+    var patch = {
+      serverUrl: serverUrl,
+      memberName: memberName,
+      notifyEnabled: !!dom.fNotify.checked,
+      // Both windows every time: main replaces the pair wholesale.
+      notifyPct: {
+        weekly: readAlertInput(dom.fNotifyWeekly),
+        '5h': readAlertInput(dom.fNotify5h)
+      }
+    };
     if (token) patch.joinToken = token;
     return patch;
   }
@@ -549,8 +616,9 @@
       return;
     }
 
+    var cap = capacityFor(state, primary);
     list.forEach(function (member) {
-      dom.members.appendChild(memberRow(member, state, primary, fair));
+      dom.members.appendChild(memberRow(member, state, primary, fair, cap));
     });
 
     if (!list.length) {
@@ -570,7 +638,7 @@
     dom.members.scrollTop = scrollTop;
   }
 
-  function memberRow(member, state, primary, fair) {
+  function memberRow(member, state, primary, fair, cap) {
     var win = memberWindow(member, primary);
     var total = num(win && win.total);
     var share = win && win.share_pct != null ? Number(win.share_pct) : 0;
@@ -624,8 +692,41 @@
     bottom.appendChild(shareEl);
     main.appendChild(bottom);
 
+    // Capacity: this member's slice of the account limit. Shown only when the
+    // main process could compute one — no gauge, no row.
+    var capPct = memberCapacity(cap, member);
+    if (capPct != null) {
+      main.appendChild(capacityLine(capPct, primary, fair, you));
+    }
+
     row.appendChild(main);
     return row;
+  }
+
+  // The fair-share marker here is 100/N of the whole account limit — the same
+  // number the AUTO alert threshold uses.
+  function capacityLine(capPct, primary, fair, you) {
+    var line = el('div', 'm-cap');
+    if (fair > 0 && capPct > fair + 0.5) line.classList.add('is-over');
+
+    var track = el('div', 'm-cap-track');
+    var fill = el('div', 'm-cap-fill');
+    fill.style.width = clampPercent(capPct) + '%';
+    track.appendChild(fill);
+    if (fair > 0 && fair < 100) {
+      var guide = el('div', 'm-cap-guide');
+      guide.style.left = fair + '%';
+      guide.title = 'fair share ' + Math.round(fair) + '% of the limit';
+      track.appendChild(guide);
+    }
+    line.appendChild(track);
+
+    var text = el('span', 'm-cap-text', '~' + (fmtPercent(capPct) || '0%') + ' of ' + WINDOW_LABEL[primary].toLowerCase() + ' limit');
+    text.title = (you ? 'You have' : 'This member has') + ' used about ' +
+      (fmtPercent(capPct) || '0%') + ' of the account’s ' + WINDOW_LABEL[primary].toLowerCase() + ' limit';
+    line.appendChild(text);
+
+    return line;
   }
 
   function card(title, text, quiet) {
@@ -801,6 +902,8 @@
           if (p.memberName) state.settings.memberName = p.memberName;
           if (p.serverUrl) state.settings.serverUrl = p.serverUrl;
           if (p.primaryWindow) state.settings.primaryWindow = p.primaryWindow;
+          if (typeof p.notifyEnabled === 'boolean') state.settings.notifyEnabled = p.notifyEnabled;
+          if (p.notifyPct) state.settings.notifyPct = p.notifyPct;
           emit();
           return clone(state);
         });
@@ -901,7 +1004,9 @@
         memberName: 'Alex Rivera',
         memberId: 'alex-rivera',
         serverUrl: 'https://subsplit.example.workers.dev',
-        primaryWindow: 'weekly'
+        primaryWindow: 'weekly',
+        notifyEnabled: true,
+        notifyPct: { weekly: null, '5h': null }
       },
       local: {
         windows: {
@@ -935,6 +1040,19 @@
           ]
         }
       },
+      // Main computes this (src/main/capacity.js); the mock carries literals so
+      // the formula is not restated in renderer code. Four members => a fair
+      // share of 25% of the account limit, which Marcus is over.
+      capacity: {
+        weekly: {
+          accountPct: 62,
+          members: { marcus: 25.9, 'alex-rivera': 15.3, priya: 12.2, bo: 8.6 }
+        },
+        '5h': {
+          accountPct: 31,
+          members: { marcus: 18.8, 'alex-rivera': 8.6, priya: 3.7, bo: 0 }
+        }
+      },
       sync: { lastSyncAt: now - 42000, error: null, clockSkewMs: 180 }
     };
 
@@ -944,11 +1062,17 @@
       state.settings.memberId = null;
       state.settings.serverUrl = '';
       state.group = null;
+      state.capacity = { weekly: null, '5h': null };
       state.sync.lastSyncAt = null;
     } else if (scenario === 'solo') {
       state.group.members = [members[1]];
       state.group.members[0].windows.weekly.share_pct = 100;
       state.group.members[0].windows['5h'].share_pct = 100;
+      // Sole member: the whole account gauge is theirs.
+      state.capacity = {
+        weekly: { accountPct: 62, members: { 'alex-rivera': 62 } },
+        '5h': { accountPct: 31, members: { 'alex-rivera': 31 } }
+      };
     } else if (scenario === 'error') {
       state.sync.error = { code: 'network_error', message: 'Can’t reach the group server (ETIMEDOUT). Showing the last data received.' };
       state.sync.lastSyncAt = now - 11 * 60e3;
@@ -956,12 +1080,15 @@
       state.local.windows = {};
       state.local.stats = { files: 0, newBytes: 0, badLines: 0, forkBaselines: 0 };
       state.group.account_rate_limit = null;
+      // No account gauge — no capacity, and no capacity UI.
+      state.capacity = { weekly: null, '5h': null };
       state.group.members.forEach(function (m) {
         m.windows.weekly.used_percent = null;
         m.windows['5h'].used_percent = null;
       });
     } else if (scenario === 'unsynced') {
       state.group = null;
+      state.capacity = { weekly: null, '5h': null };
       state.sync.lastSyncAt = null;
     }
 

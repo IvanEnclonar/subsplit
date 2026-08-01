@@ -33,41 +33,73 @@
     </header>
 
     <div class="form-body">
-      <p class="lede" data-role="form-lede">Point SubSplit at your group’s server and paste the join token you were given.</p>
-
       <form class="form" data-role="form" novalidate>
-        <div class="field">
-          <label class="field-label" for="f-server">Server URL</label>
-          <input class="input" id="f-server" data-role="f-server" type="text" inputmode="url"
-                 placeholder="https://subsplit.example.workers.dev" spellcheck="false"
-                 autocomplete="off" autocapitalize="off" autocorrect="off" />
+        <!-- Only the fields scroll: the popover is a fixed 520px and the settings
+             flavour of this form is taller, so the CTA has to stay pinned. -->
+        <div class="form-fields">
+          <p class="lede" data-role="form-lede">Point SubSplit at your group’s server and paste the join token you were given.</p>
+
+          <div class="field">
+            <label class="field-label" for="f-server">Server URL</label>
+            <input class="input" id="f-server" data-role="f-server" type="text" inputmode="url"
+                   placeholder="https://subsplit.example.workers.dev" spellcheck="false"
+                   autocomplete="off" autocapitalize="off" autocorrect="off" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="f-token">Join token</label>
+            <input class="input" id="f-token" data-role="f-token" type="password"
+                   placeholder="ss_…" spellcheck="false" autocomplete="off" />
+            <p class="field-hint" data-role="f-token-hint" hidden>Leave blank to keep the token you already have.</p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="f-name">Your name</label>
+            <input class="input" id="f-name" data-role="f-name" type="text" maxlength="40"
+                   placeholder="Alex" spellcheck="false" autocomplete="off" />
+          </div>
+
+          <fieldset class="alerts" data-role="alerts" hidden>
+            <legend class="alerts-legend">Usage alerts</legend>
+
+            <label class="check">
+              <input type="checkbox" data-role="f-notify" />
+              <span>Notify me on this machine when my share crosses the threshold</span>
+            </label>
+
+            <div class="alerts-row">
+              <div class="field">
+                <label class="field-label" for="f-notify-weekly">Weekly</label>
+                <input class="input" id="f-notify-weekly" data-role="f-notify-weekly" type="number"
+                       min="1" max="100" step="1" inputmode="numeric"
+                       placeholder="auto (fair share)" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label class="field-label" for="f-notify-5h">5h</label>
+                <input class="input" id="f-notify-5h" data-role="f-notify-5h" type="number"
+                       min="1" max="100" step="1" inputmode="numeric"
+                       placeholder="auto (fair share)" autocomplete="off" />
+              </div>
+            </div>
+
+            <p class="field-hint" data-role="f-notify-hint"></p>
+          </fieldset>
         </div>
 
-        <div class="field">
-          <label class="field-label" for="f-token">Join token</label>
-          <input class="input" id="f-token" data-role="f-token" type="password"
-                 placeholder="ss_…" spellcheck="false" autocomplete="off" />
-          <p class="field-hint" data-role="f-token-hint" hidden>Leave blank to keep the token you already have.</p>
+        <div class="form-actions">
+          <p class="form-error" data-role="form-error" hidden></p>
+
+          <button type="submit" class="btn btn-primary" data-role="form-submit">Join group</button>
+
+          <p class="privacy">
+            <svg class="privacy-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
+              <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+            </svg>
+            <span>Only token counts leave this machine — never your code or prompts.</span>
+          </p>
         </div>
-
-        <div class="field">
-          <label class="field-label" for="f-name">Your name</label>
-          <input class="input" id="f-name" data-role="f-name" type="text" maxlength="40"
-                 placeholder="Alex" spellcheck="false" autocomplete="off" />
-        </div>
-
-        <p class="form-error" data-role="form-error" hidden></p>
-
-        <button type="submit" class="btn btn-primary" data-role="form-submit">Join group</button>
       </form>
-
-      <p class="privacy">
-        <svg class="privacy-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
-          <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
-        </svg>
-        <span>Only token counts leave this machine — never your code or prompts.</span>
-      </p>
     </div>
   </section>
 

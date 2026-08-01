@@ -299,20 +299,46 @@ input { font: inherit; }
 .form-body {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 16px 18px 14px;
   display: flex;
   flex-direction: column;
 }
 
 .lede {
-  margin: 0 0 16px;
+  margin: 0 0 4px;
   font-size: 12px;
   line-height: 1.45;
   color: var(--text-2);
 }
 
-.form { display: flex; flex-direction: column; gap: 12px; }
+.form { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* The settings flavour of this form is taller than the fixed 520px popover, so
+   the fields take the scroll and the submit button never leaves the viewport.
+   The negative margins let the scrollbar sit in .form-body's gutter instead of
+   clipping the inputs' focus ring. */
+.form-fields {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -18px;
+  padding: 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form-fields::-webkit-scrollbar { width: 8px; }
+.form-fields::-webkit-scrollbar-thumb {
+  background: var(--track);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.form-fields::-webkit-scrollbar-thumb:hover { background: var(--line); background-clip: content-box; }
+
+.form-actions { flex: none; display: flex; flex-direction: column; gap: 10px; }
 
 .field { display: flex; flex-direction: column; gap: 5px; }
 
@@ -347,6 +373,42 @@ input { font: inherit; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* usage alerts block (settings) */
+
+/* --bg, not --surface: the inputs inside are --surface, and they need the same
+   fill step against their container that every other field in the form has. */
+.alerts {
+  margin: 2px 0 0;
+  padding: 10px 11px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.alerts-legend {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.alerts-row { display: flex; gap: 9px; }
+.alerts-row .field { flex: 1; min-width: 0; }
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.check input { flex: none; margin: 1px 0 0; accent-color: var(--accent); }
+
 .form-error {
   margin: -2px 0 0;
   font-size: 11.5px;
@@ -359,8 +421,8 @@ input { font: inherit; }
 }
 
 .privacy {
-  margin: auto 0 0;
-  padding-top: 18px;
+  margin: 0;
+  padding-top: 8px;
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -642,6 +704,56 @@ input { font: inherit; }
 }
 
 .member.is-over .m-share { color: var(--warm); }
+
+/* capacity share — this member's slice of the account limit */
+
+.m-cap { display: flex; align-items: center; gap: 8px; }
+
+.m-cap-track {
+  position: relative;
+  flex: none;
+  width: 54px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--track);
+}
+
+.m-cap-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 2px;
+  background: var(--bar-neutral);
+  transition: width 0.4s cubic-bezier(0.22, 0.7, 0.3, 1);
+}
+
+.member.is-you .m-cap-fill { background: var(--accent); }
+.m-cap.is-over .m-cap-fill { background: var(--warm); }
+
+.m-cap-guide {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  left: 0;
+  background: var(--guide);
+  border-radius: 1px;
+  opacity: 0.65;
+}
+
+.m-cap-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member.is-you .m-cap-text { color: var(--text-2); }
+.m-cap.is-over .m-cap-text { color: var(--warm); }
 
 .member.is-stale { opacity: 0.62; }
 

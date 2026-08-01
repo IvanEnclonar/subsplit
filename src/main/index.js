@@ -6,7 +6,7 @@
 // and setLoginItemSettings' registry name derive from), then the single-instance
 // lock synchronously, before anything else happens.
 
-const { app, Menu, ipcMain } = require('electron');
+const { app, Menu, ipcMain, Notification } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -20,6 +20,8 @@ const trayModule = require('./tray');
 const { createScanner } = require('./parser');
 const { computeWindows } = require('./windows');
 const { createSync, toErrorInfo } = require('./sync');
+const { computeCapacity } = require('./capacity');
+const { evaluateAlerts } = require('./notify');
 
 // ---------------------------------------------------------------------------
 // constants
@@ -298,6 +300,7 @@ function rescan() {
     console.error('[subsplit] could not persist the scanner cache:', (err && err.message) || err);
   }
 
+  evaluateAndNotify();
   broadcast();
   maybePush(false);
 }
@@ -361,6 +364,52 @@ function applyGroupState(groupState) {
   if (!groupState || typeof groupState !== 'object') return;
   state.group = groupState;
   if (typeof groupState.etag === 'string' && groupState.etag) state.etag = groupState.etag;
+  evaluateAndNotify();
+}
+
+// ---------------------------------------------------------------------------
+// usage alerts
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide (notify.js) and fire. Local to this machine: every member's app
+ * evaluates its own share, so nobody is told about anybody else's usage. The
+ * latch is persisted so a restart cannot replay an alert.
+ */
+function evaluateAndNotify() {
+  let result;
+  try {
+    result = evaluateAlerts({
+      capacity: computeCapacity(state.group),
+      groupState: state.group,
+      settings: state.settings,
+      memberId: state.settings.memberId,
+      nowMs: Date.now(),
+      syncError: state.syncError,
+    });
+  } catch (err) {
+    console.error('[subsplit] alert evaluation failed:', (err && err.message) || err);
+    return;
+  }
+
+  for (const alert of result.alerts) {
+    try {
+      if (Notification && typeof Notification.isSupported === 'function' && Notification.isSupported()) {
+        new Notification({ title: alert.title, body: alert.body }).show();
+      }
+    } catch (err) {
+      console.error('[subsplit] could not show a notification:', (err && err.message) || err);
+    }
+  }
+
+  try {
+    const before = JSON.stringify(state.settings.notifyLatch || {});
+    if (JSON.stringify(result.prunedLatch) !== before) {
+      state.settings = settingsStore.saveSettings({ notifyLatch: result.prunedLatch });
+    }
+  } catch (err) {
+    console.error('[subsplit] could not persist the alert latch:', (err && err.message) || err);
+  }
 }
 
 function schedulePush(delay) {
@@ -456,12 +505,14 @@ async function pollNow(force) {
     const result = await sync.poll(state.etag);
     // An answer from the group we just left must not touch the current one.
     if (epoch !== syncEpoch) return;
+    // Cleared before the state is applied: alerts must not be suppressed by the
+    // error this very poll just resolved.
+    state.lastSyncAt = Date.now();
+    state.syncError = null;
     if (!result.notModified) {
       applyGroupState(result.state);
       if (result.etag) state.etag = result.etag;
     }
-    state.lastSyncAt = Date.now();
-    state.syncError = null;
   } catch (err) {
     if (epoch !== syncEpoch) return;
     state.syncError = toErrorInfo(err);
@@ -556,6 +607,11 @@ function buildUiState() {
       memberId: state.settings.memberId || null,
       serverUrl: state.settings.serverUrl,
       primaryWindow: state.settings.primaryWindow,
+      notifyEnabled: state.settings.notifyEnabled,
+      notifyPct: {
+        '5h': state.settings.notifyPct ? state.settings.notifyPct['5h'] : null,
+        weekly: state.settings.notifyPct ? state.settings.notifyPct.weekly : null,
+      },
     },
     local: {
       windows: state.windows,
@@ -563,6 +619,8 @@ function buildUiState() {
       stats: state.scanStats,
     },
     group: state.group,
+    // Computed here so the formula lives in exactly one place.
+    capacity: computeCapacity(state.group),
     sync: {
       lastSyncAt: state.lastSyncAt,
       error: state.syncError,
@@ -838,14 +896,28 @@ function registerIpc() {
     if (input.primaryWindow === '5h' || input.primaryWindow === 'weekly') {
       next.primaryWindow = input.primaryWindow;
     }
+    if (typeof input.notifyEnabled === 'boolean') next.notifyEnabled = input.notifyEnabled;
+    // notifyPct is replaced whole — the form always submits both windows.
+    // `notifyLatch` is main's own bookkeeping and is never renderer-writable.
+    if (input.notifyPct && typeof input.notifyPct === 'object') {
+      next.notifyPct = {
+        '5h': input.notifyPct['5h'],
+        weekly: input.notifyPct.weekly,
+      };
+    }
 
     // A token typed into the settings form is a re-join, not a settings write:
     // the member id has to come back from the server.
     const token = typeof input.joinToken === 'string' ? input.joinToken.trim() : '';
     const serverUrl = next.serverUrl !== undefined ? next.serverUrl : state.settings.serverUrl;
     if (token && (token !== state.settings.joinToken || serverUrl !== state.settings.serverUrl)) {
-      if (next.primaryWindow) {
-        state.settings = settingsStore.saveSettings({ primaryWindow: next.primaryWindow });
+      // Preferences typed alongside the token must not be lost to the re-join.
+      const carry = {};
+      for (const key of ['primaryWindow', 'notifyEnabled', 'notifyPct']) {
+        if (next[key] !== undefined) carry[key] = next[key];
+      }
+      if (Object.keys(carry).length) {
+        state.settings = settingsStore.saveSettings(carry);
       }
       return joinGroup({
         serverUrl,
@@ -997,6 +1069,7 @@ module.exports = {
   __test: {
     state,
     codexRoots,
+    buildUiState,
     rebuildSyncClient,
     maybePush,
     pollNow,

@@ -560,3 +560,27 @@ test('a push the server did not accept is reported, not counted as synced', asyn
   assert.strictEqual(main.state.syncError, null);
   assert.ok(main.state.lastPushedKey, 'an accepted push is remembered');
 });
+
+test('UiState carries the capacity share, and still never the join token', () => {
+  const main = loadMain();
+  main.state.group = Object.assign({}, GROUP_STATE, {
+    account_rate_limit: {
+      ts: 1_700_000_000_000,
+      planType: 'plus',
+      credits: null,
+      windows: [{ windowMinutes: 10080, usedPercent: 50, resetsAt: 1_700_000_600_000 }],
+    },
+  });
+
+  const ui = main.buildUiState();
+
+  // Ada is the only member, so the whole account gauge is hers.
+  assert.strictEqual(ui.capacity.weekly.accountPct, 50);
+  assert.strictEqual(ui.capacity.weekly.members.ada, 50);
+  assert.strictEqual(ui.capacity['5h'], null, 'no 5h snapshot, no 5h capacity');
+
+  assert.strictEqual(ui.settings.notifyEnabled, true);
+  assert.deepStrictEqual(ui.settings.notifyPct, { '5h': null, weekly: null });
+  assert.strictEqual(ui.settings.joinToken, undefined, 'the token never reaches the renderer');
+  assert.ok(!JSON.stringify(ui).includes(TOKEN));
+});

@@ -147,6 +147,10 @@ system tray icons** and turn it on. There is no API to force promotion.
   subscription, not to a person. SubSplit takes the freshest snapshot any member's logs
   have seen and shows it as the account header. Snapshots are never added together —
   summing four members' `used_percent` would report four times the real consumption.
+- **Capacity share puts the two together.** Under each member SubSplit shows
+  `account used% × (their tokens / the group's tokens)` for the window on screen — "~31% of
+  weekly limit". It is an estimate built on the caveat below, but it answers the question
+  people actually ask: how much of the subscription have *I* eaten this week.
 - **The fair-share guide sits at 100/N%.** With four members that is a line at 25% on
   every share bar. It is a reference mark, not a limit: SubSplit does not throttle anyone.
 - **Caveat worth internalising: OpenAI's `used_percent` is not proportional to raw
@@ -155,6 +159,27 @@ system tray icons** and turn it on. There is no API to force promotion.
   *fairness proxy* — the best available per-person signal — while the percentage bar is
   the *ground truth for the account*. Expect them to disagree, and settle arguments with
   the tokens while planning the week with the percentage.
+
+## Notifications
+
+SubSplit can raise a native toast when **your own** share of the account crosses a
+threshold — "You've used ~34% of the account's weekly limit (alert at 25%). Resets in 2d
+4h." The number it watches is your *capacity share*: the account's `used_percent` for that
+window, split by your share of the group's tokens in it. The popover shows the same figure
+under every member, so the alert never says anything the dashboard doesn't.
+
+Open the gear icon to set it up. Each window has its own threshold, and leaving a box empty
+means **auto** — your fair share, `100/N`, recalculated as people join or leave. Each alert
+fires once per window per threshold and re-arms when the window resets. Nothing fires while
+the group server is unreachable, because the numbers behind it would be stale. Alerts are
+raised locally on your own machine: nobody else is told, and no alert text ever contains
+your join token.
+
+**Windows: the `portable` build may not show toasts.** Windows only delivers toasts to apps
+with a Start Menu shortcut carrying the matching AppUserModelID, and the portable target
+does not install one. The `nsis` installer does (`createStartMenuShortcut` is on), so use
+that if you want notifications. macOS asks for notification permission the first time an
+alert fires; Focus modes and Do Not Disturb silence them as usual.
 
 ## Limitations and privacy
 
@@ -179,8 +204,8 @@ system tray icons** and turn it on. There is no API to force promotion.
 
 - Per-model cost weighting, so a share number tracks money rather than raw tokens.
 - Claude Code support alongside Codex (same local-log approach, different scanner).
-- Notifications: quota thresholds and window resets, coalesced so N members don't get N
-  copies of the same alert.
+- Window-reset notifications, and group-level alerts coalesced so N members don't get N
+  copies of the same warning.
 
 ## License
 

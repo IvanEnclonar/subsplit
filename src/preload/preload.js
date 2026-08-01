@@ -35,7 +35,22 @@ function pickSettings(partial) {
   if (partial.primaryWindow === '5h' || partial.primaryWindow === 'weekly') {
     out.primaryWindow = partial.primaryWindow;
   }
+  if (typeof partial.notifyEnabled === 'boolean') out.notifyEnabled = partial.notifyEnabled;
+  // Per-window alert thresholds. null (or anything unusable) means AUTO; main
+  // normalizes. The internal `notifyLatch` is deliberately not crossable.
+  if (partial.notifyPct && typeof partial.notifyPct === 'object') {
+    out.notifyPct = {
+      '5h': asPct(partial.notifyPct['5h']),
+      weekly: asPct(partial.notifyPct.weekly),
+    };
+  }
   return out;
+}
+
+function asPct(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 const api = {
