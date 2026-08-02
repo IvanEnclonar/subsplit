@@ -6,7 +6,7 @@
 // and setLoginItemSettings' registry name derive from), then the single-instance
 // lock synchronously, before anything else happens.
 
-const { app, Menu, ipcMain, Notification, clipboard } = require('electron');
+const { app, Menu, ipcMain, Notification, clipboard, shell } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -19,7 +19,7 @@ const settingsStore = require('./settings');
 const trayModule = require('./tray');
 const { createScanner } = require('./parser');
 const { computeWindows } = require('./windows');
-const { createSync, toErrorInfo } = require('./sync');
+const { createSync, checkHealth, validateServerUrl, toErrorInfo } = require('./sync');
 const { computeCapacity } = require('./capacity');
 const { computePace } = require('./pace');
 const { evaluateAlerts } = require('./notify');
@@ -45,9 +45,15 @@ const IPC_CHANNELS = {
   syncRefresh: 'sync:refresh',
   inviteCopy: 'invite:copy',
   invitePaste: 'invite:paste',
+  diagOpen: 'diag:open',
+  diagHealth: 'diag:health',
   appQuit: 'app:quit',
 };
 const STATE_CHANGED = 'state:changed';
+
+// The only non-index target `diag:open` accepts. Everything the renderer may
+// ask for is an index or this enum — never a path (see openDiagnosticsTarget).
+const DIAG_TARGET_APP_DATA = 'app-data';
 
 // ---------------------------------------------------------------------------
 // mutable app state
@@ -72,6 +78,11 @@ const state = {
   skipNextPoll: false,
   pollIntervalMs: POLL_INTERVAL_MS,
   loginItemEnabled: false,
+  // Codex homes this process is actually watching (resolved once at startup).
+  roots: [],
+  // Latest "Test connection" result, or null. Carries no credentials: the probe
+  // it comes from is unauthenticated.
+  health: null,
   // { serverUrl, joinToken } parsed from a pasted invite. Main-process only:
   // it is never put in a UiState, an IPC reply, or a log line.
   pendingInvite: null,
@@ -116,6 +127,106 @@ function codexRoots() {
     if (roots.length) return roots;
   }
   return [path.join(os.homedir(), '.codex')];
+}
+
+/** The roots this process is watching, or what it would watch if asked now. */
+function resolvedRoots() {
+  return Array.isArray(state.roots) && state.roots.length ? state.roots : codexRoots();
+}
+
+/**
+ * Diagnostics: each Codex home and whether it is on disk. "SubSplit shows
+ * zeroes" is nearly always a root that does not exist, and nothing else in the
+ * UI ever says which folders were even looked at.
+ */
+function describeRoots() {
+  return resolvedRoots().map((root) => {
+    let exists = false;
+    try {
+      exists = fs.existsSync(root);
+    } catch (_err) {
+      exists = false;
+    }
+    return { path: root, exists };
+  });
+}
+
+function appDataDir() {
+  try {
+    return settingsStore.paths().baseDir;
+  } catch (_err) {
+    return null;
+  }
+}
+
+/**
+ * Open one diagnostics folder in the OS file manager.
+ *
+ * The renderer sends an INDEX into the root list (or the app-data enum) and
+ * never a path: main resolves the folder from its own state, so this stays a
+ * two-entry menu instead of becoming a generic "open anything" primitive for a
+ * compromised renderer. Out-of-range, non-integer and string arguments all
+ * resolve to nothing and open nothing.
+ */
+async function openDiagnosticsTarget(target) {
+  let dir = null;
+  if (target === DIAG_TARGET_APP_DATA) {
+    dir = appDataDir();
+  } else if (Number.isInteger(target) && target >= 0) {
+    const roots = resolvedRoots();
+    if (target < roots.length) dir = roots[target];
+  }
+  if (!dir) return { ok: false, error: 'There is no folder to open there.' };
+
+  try {
+    const problem = await shell.openPath(dir);
+    if (problem) {
+      return { ok: false, error: 'That folder could not be opened — it may not exist yet.' };
+    }
+  } catch (err) {
+    console.error('[subsplit] could not open a folder:', (err && err.message) || err);
+    return { ok: false, error: 'That folder could not be opened.' };
+  }
+  return { ok: true };
+}
+
+/**
+ * "Test connection": an unauthenticated GET /v1/health (see checkHealth in
+ * sync.js). It answers whether the URL in the form reaches a SubSplit server at
+ * all, which a 401 from an authenticated route cannot.
+ *
+ * `requestedUrl` is what the renderer currently has in its Server URL field, so
+ * the button tests the URL the user is looking at rather than the one last
+ * saved — testing a typo'd or replaced address is the whole point of the button.
+ * It is untrusted input: it is vetted with validateServerUrl here, and it
+ * reaches nothing but the health fetch (never saved, never carrying a token).
+ *
+ * A field that is blank (or a renderer that sent nothing usable at all) falls
+ * back to the stored URL. A field that holds a non-empty string which is not a
+ * valid http(s) URL is reported *as typed* and never becomes a request: falling
+ * back there would answer "Reachable" about a server the user is not looking at,
+ * which is the same lie as testing the stored URL in the first place.
+ */
+async function runHealthCheck(requestedUrl) {
+  const candidate = typeof requestedUrl === 'string' ? requestedUrl.trim() : '';
+  const urlError = candidate ? validateServerUrl(candidate) : null;
+  const result = urlError
+    ? {
+        ok: false,
+        latencyMs: 0,
+        version: null,
+        error: { code: urlError.code, message: urlError.message },
+      }
+    : await checkHealth({ serverUrl: candidate || state.settings.serverUrl });
+  state.health = {
+    ok: result.ok,
+    latencyMs: result.latencyMs,
+    version: result.version,
+    error: result.error,
+    checkedAt: Date.now(),
+  };
+  broadcast();
+  return state.health;
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +748,13 @@ function buildUiState() {
       windows: state.windows,
       lastScanAt: state.lastScanAt,
       stats: state.scanStats,
+      // Diagnostics. Paths travel main -> renderer only; nothing the renderer
+      // sends back is ever a path (see openDiagnosticsTarget).
+      roots: describeRoots(),
+      appDataPath: appDataDir(),
+      // What the OS says, not what we asked for: unsigned macOS builds can have
+      // setLoginItemSettings silently ignored.
+      loginItemEnabled: state.loginItemEnabled,
     },
     group: state.group,
     // Computed here so the formula lives in exactly one place.
@@ -646,6 +764,7 @@ function buildUiState() {
       lastSyncAt: state.lastSyncAt,
       error: state.syncError,
       clockSkewMs: state.clockSkewMs,
+      health: state.health,
     },
   };
 }
@@ -942,6 +1061,7 @@ function showPopover(bounds) {
   trayModule.positionWindow(popover, anchor);
   popover.show();
   popover.focus();
+  state.loginItemEnabled = readLoginItemEnabled();
   broadcast();
   scheduleRescan(0);
 }
@@ -1011,7 +1131,12 @@ function handle(channel, handler) {
 }
 
 function registerIpc() {
-  handle(IPC_CHANNELS.stateGet, () => buildUiState());
+  handle(IPC_CHANNELS.stateGet, () => {
+    // The diagnostics block reports the real OS status, and it can change
+    // behind our back (or never have taken effect at all).
+    state.loginItemEnabled = readLoginItemEnabled();
+    return buildUiState();
+  });
 
   handle(IPC_CHANNELS.settingsSave, (partial) => {
     const input = partial && typeof partial === 'object' ? partial : {};
@@ -1109,6 +1234,14 @@ function registerIpc() {
     };
   });
 
+  // Diagnostics. `target` is an index into the Codex-root list or the app-data
+  // enum — main does the resolving, so a path string can never be honoured.
+  handle(IPC_CHANNELS.diagOpen, (target) => openDiagnosticsTarget(target));
+
+  // The renderer sends the Server URL field as it stands; runHealthCheck
+  // validates it and falls back to the stored URL.
+  handle(IPC_CHANNELS.diagHealth, (serverUrl) => runHealthCheck(serverUrl));
+
   handle(IPC_CHANNELS.appQuit, () => {
     quitApp();
     return null;
@@ -1192,7 +1325,10 @@ function bootstrap() {
     state.loginItemEnabled = readLoginItemEnabled();
     rebuildSyncClient();
 
+    // Resolved once: the watcher, the scanner and the diagnostics panel must
+    // all be talking about the same folders.
     const roots = codexRoots();
+    state.roots = roots;
     scanner = createScanner({ roots, cache: settingsStore.loadCache() });
 
     setupApplicationMenu();
@@ -1231,6 +1367,9 @@ module.exports = {
   __test: {
     state,
     codexRoots,
+    describeRoots,
+    openDiagnosticsTarget,
+    runHealthCheck,
     buildUiState,
     rebuildSyncClient,
     maybePush,

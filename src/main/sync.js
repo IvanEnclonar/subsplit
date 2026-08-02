@@ -10,6 +10,9 @@
 // `fetchImpl` is injectable so this file is unit-testable under plain node.
 
 const DEFAULT_TIMEOUT_MS = 10000;
+// The health probe is a "is this thing on?" click, not a sync: it must answer
+// (or give up) while the user is still looking at the button.
+const HEALTH_TIMEOUT_MS = 5000;
 
 class SyncError extends Error {
   constructor(code, message, status) {
@@ -107,7 +110,7 @@ function joinUrl(base, pathname) {
 // header separators or non-ASCII bytes before it reaches fetch().
 const TOKEN_RE = /^[\x21-\x7e]+$/;
 
-function validateConfig(serverUrl, token) {
+function validateServerUrl(serverUrl) {
   if (typeof serverUrl !== 'string' || !serverUrl.trim()) {
     return new SyncError('config', 'Set a server URL first.');
   }
@@ -120,6 +123,12 @@ function validateConfig(serverUrl, token) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return new SyncError('config', 'Server URL must start with http:// or https://.');
   }
+  return null;
+}
+
+function validateConfig(serverUrl, token) {
+  const urlError = validateServerUrl(serverUrl);
+  if (urlError) return urlError;
   if (typeof token !== 'string' || !token.trim()) {
     return new SyncError('config', 'Paste the join token from whoever set up the group.');
   }
@@ -299,9 +308,131 @@ function createSync(options) {
   return { join, push, poll, serverUrl, timeoutMs };
 }
 
+/**
+ * checkHealth({ serverUrl, fetchImpl?, timeoutMs? })
+ *   -> { ok, latencyMs, version: string|null, error: {code,message}|null }
+ *
+ * Deliberately NOT part of createSync: request() above attaches an
+ * Authorization header to everything it sends, and /v1/health is the one route
+ * the server answers unauthenticated. A reachability probe that carried the
+ * group secret would put it on the wire (and in any proxy log) every time
+ * someone poked at a URL they had typed wrong — so no token comes in here at
+ * all, and none can be attached.
+ *
+ * Never throws: a failure is the returned value. `latencyMs` is round trip,
+ * measured either way, because "reachable but 4 seconds away" is a diagnosis.
+ *
+ * `ok: true` requires a 2xx carrying JSON `{ ok: true }` — a 2xx alone is what a
+ * captive portal, a parked domain and an SPA catch-all all send.
+ */
+async function checkHealth(options) {
+  const opts = options || {};
+  const serverUrl = typeof opts.serverUrl === 'string' ? opts.serverUrl.trim() : '';
+  const timeoutMs =
+    Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : HEALTH_TIMEOUT_MS;
+  const fetchImpl =
+    typeof opts.fetchImpl === 'function'
+      ? opts.fetchImpl
+      : typeof globalThis.fetch === 'function'
+        ? globalThis.fetch.bind(globalThis)
+        : null;
+
+  const started = Date.now();
+  const fail = (code, message) => ({
+    ok: false,
+    latencyMs: Date.now() - started,
+    version: null,
+    error: { code, message },
+  });
+
+  const urlError = validateServerUrl(serverUrl);
+  if (urlError) return fail(urlError.code, urlError.message);
+  if (!fetchImpl) return fail('config', 'No fetch implementation available in this runtime.');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let res;
+    try {
+      res = await fetchImpl(joinUrl(serverUrl, '/v1/health'), {
+        method: 'GET',
+        // No Authorization header, on purpose. Do not add one.
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+    } catch (err) {
+      if (isAbortError(err)) {
+        return fail('timeout', `The server did not answer within ${formatTimeout(timeoutMs)}.`);
+      }
+      return fail('network', `Could not reach the server (${(err && err.message) || 'network error'}).`);
+    }
+
+    const status = Number(res && res.status);
+    if (!Number.isFinite(status)) {
+      return fail('bad_response', 'The server sent a response we could not read.');
+    }
+
+    let text = '';
+    try {
+      text = typeof res.text === 'function' ? await res.text() : '';
+    } catch (err) {
+      if (isAbortError(err)) {
+        return fail('timeout', `The server did not answer within ${formatTimeout(timeoutMs)}.`);
+      }
+      return fail('network', 'The connection dropped while reading the response.');
+    }
+
+    let parsed = null;
+    if (text && text.trim()) {
+      try {
+        parsed = JSON.parse(text);
+      } catch (_err) {
+        parsed = null;
+      }
+    }
+
+    if (status < 200 || status >= 300) {
+      const err = errorFromBody(parsed, status);
+      return fail(err.code, err.message);
+    }
+    if (parsed && typeof parsed === 'object' && parsed.ok === false) {
+      return fail('unhealthy', 'The server answered, but reported itself unhealthy.');
+    }
+    // A 2xx on its own proves only that *something* answered: captive portals,
+    // parked domains and SPA catch-alls all return 200 with HTML. Require the
+    // positive signal a real SubSplit server sends ({ ok: true }), so "Reachable"
+    // means "this is the server" rather than "the packets came back".
+    if (!parsed || typeof parsed !== 'object' || parsed.ok !== true) {
+      return fail(
+        'bad_response',
+        'Something answered, but it does not look like a SubSplit server. Check the server URL.'
+      );
+    }
+
+    let version = null;
+    if (parsed && typeof parsed.server_version === 'string' && parsed.server_version) {
+      version = parsed.server_version.slice(0, 32);
+    } else if (parsed && Number.isFinite(parsed.server_version)) {
+      version = String(parsed.server_version);
+    }
+
+    return { ok: true, latencyMs: Date.now() - started, version, error: null };
+  } catch (err) {
+    return fail('unknown', (err && err.message) || 'The health check failed.');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 module.exports = {
   createSync,
+  checkHealth,
+  // Exported so main can vet a server URL that came from the renderer before it
+  // is used for anything (see runHealthCheck in index.js).
+  validateServerUrl,
   SyncError,
   toErrorInfo,
   DEFAULT_TIMEOUT_MS,
+  HEALTH_TIMEOUT_MS,
 };

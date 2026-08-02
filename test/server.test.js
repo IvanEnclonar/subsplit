@@ -161,6 +161,34 @@ test('GET /v1/health needs no auth and reports the server clock', async () => {
   assert.ok(Math.abs(res.body.server_time - Date.now()) < 60_000);
 });
 
+test('GET /v1/health reports SERVER_VERSION, on both deploy targets', async () => {
+  assert.equal(typeof core.SERVER_VERSION, 'string');
+  assert.ok(core.SERVER_VERSION.length > 0);
+
+  const res = await request('GET', '/v1/health');
+  assert.equal(res.body.server_version, core.SERVER_VERSION);
+
+  // The version comes out of the shared router, not out of local.js — so the
+  // Worker deploy, which has no health route of its own either, reports the
+  // same string from the same constant.
+  const viaCore = await core
+    .createRouter({ store: {}, adminToken: '', now: () => 1_700_000_000_000 })
+    .handle({ method: 'GET', path: '/v1/health', headers: {}, query: {}, rawBody: '' });
+  assert.equal(viaCore.status, 200);
+  assert.deepEqual(viaCore.body, {
+    ok: true,
+    server_time: 1_700_000_000_000,
+    server_version: core.SERVER_VERSION,
+  });
+});
+
+test('GET /v1/health answers even with a bad token, and never echoes one', async () => {
+  const res = await request('GET', '/v1/health', { token: 'ss_nope_notarealsecret' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.ok(!res.text.includes('notarealsecret'));
+});
+
 test('POST /v1/groups requires the admin token', async () => {
   const missing = await request('POST', '/v1/groups');
   assert.equal(missing.status, 401);

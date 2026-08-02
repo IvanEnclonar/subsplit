@@ -9,6 +9,8 @@
  *   refreshNow()    -> Promise<UiState>
  *   copyInvite()    -> Promise<{ ok } | { ok: false, error }>
  *   pasteInvite()   -> Promise<{ ok, serverUrl, tokenMasked } | { ok: false, error }>
+ *   openFolder(t)   -> Promise<{ ok } | { ok: false, error }>   t = root index | 'app-data'
+ *   testConnection(u)-> Promise<{ ok, latencyMs, version, error, checkedAt }>  u = Server URL field
  *   quit()          -> void
  *   onState(cb)     -> unsubscribe()
  *
@@ -67,6 +69,14 @@
     fNotifyWeekly: role('f-notify-weekly'),
     fNotify5h: role('f-notify-5h'),
     fNotifyHint: role('f-notify-hint'),
+    diag: role('diag'),
+    diagRoots: role('diag-roots'),
+    diagAppData: role('diag-appdata'),
+    diagStats: role('diag-stats'),
+    diagLogin: role('diag-login'),
+    diagHealth: role('diag-health'),
+    openAppDataBtn: document.querySelector('[data-action="open-appdata"]'),
+    testConnectionBtn: document.querySelector('[data-action="test-connection"]'),
     formError: role('form-error'),
     formSubmit: role('form-submit'),
     formBack: document.querySelector('[data-action="form-back"]'),
@@ -224,7 +234,12 @@
       local: {
         windows: local.windows && typeof local.windows === 'object' ? local.windows : {},
         lastScanAt: local.lastScanAt == null ? null : Number(local.lastScanAt),
-        stats: local.stats && typeof local.stats === 'object' ? local.stats : null
+        stats: local.stats && typeof local.stats === 'object' ? local.stats : null,
+        // Diagnostics. Roots arrive as paths to print; what goes back the other
+        // way is only ever their index (see doOpenFolder).
+        roots: Array.isArray(local.roots) ? local.roots.filter(function (r) { return r && typeof r === 'object'; }) : [],
+        appDataPath: typeof local.appDataPath === 'string' ? local.appDataPath : '',
+        loginItemEnabled: !!local.loginItemEnabled
       },
       group: s.group && typeof s.group === 'object' ? s.group : null,
       // Computed in the main process (src/main/capacity.js) — never here.
@@ -234,7 +249,10 @@
       sync: {
         lastSyncAt: sync.lastSyncAt == null ? null : Number(sync.lastSyncAt),
         error: sync.error && typeof sync.error === 'object' ? sync.error : null,
-        clockSkewMs: sync.clockSkewMs == null ? null : Number(sync.clockSkewMs)
+        clockSkewMs: sync.clockSkewMs == null ? null : Number(sync.clockSkewMs),
+        // Latest "Test connection" result, or null. Never carries a token: the
+        // probe behind it is unauthenticated.
+        health: sync.health && typeof sync.health === 'object' ? sync.health : null
       }
     };
   }
@@ -368,13 +386,14 @@
   var current = null;      // normalized UiState
   var mode = 'loading';    // 'loading' | 'onboard' | 'dash' | 'settings'
   var formMode = 'onboard';// which flavour the shared form is showing
-  var busy = { form: false, refresh: false };
+  var busy = { form: false, refresh: false, health: false };
   var ticking = [];        // [{ node, resetAt }]
   // True once a pasted invite is loaded: the token itself stayed in the main
   // process, so the form submits an empty token and main fills it back in.
   var fromInvite = false;
   var inviteServer = '';   // the URL that invite is good for, as main sees it
   var noteTimer = null;
+  var healthTimer = null;  // the health note is transient — it ages out
 
   // Main matches a pending invite to the submitted URL canonically, and treats a
   // trailing slash as the same server (src/main/invite.js). Mirror that here so
@@ -400,6 +419,9 @@
       else setMode(mode);
     }
     if (mode === 'dash') renderDash();
+    // Diagnostics hold no user input, so a state push may refresh them in place
+    // without disturbing whatever is half-typed in the fields above.
+    if (mode === 'settings') renderDiagnostics();
     return current;
   }
 
@@ -428,9 +450,12 @@
     show(dom.copyInviteBtn, !onboarding);
     setInviteNote('');
 
-    // Alerts are about your own share of a group you are already in.
+    // Alerts are about your own share of a group you are already in, and
+    // diagnostics are about a setup that already exists.
     show(dom.alerts, !onboarding);
     if (!onboarding) fillAlerts();
+    show(dom.diag, !onboarding);
+    if (!onboarding) renderDiagnostics();
 
     setFormError(null);
     setFormBusy(false);
@@ -457,6 +482,136 @@
     if (!raw) return null;
     var n = Math.round(Number(raw));
     return isFinite(n) && n >= 1 && n <= 100 ? n : null;
+  }
+
+  /* ───────────────────────── diagnostics ───────────────────────── */
+
+  function fmtBytes(value) {
+    var n = Math.max(0, Math.round(num(value)));
+    if (n < 1024) return n + ' B';
+    var units = [[1 << 30, 'GB'], [1 << 20, 'MB'], [1024, 'KB']];
+    for (var i = 0; i < units.length; i++) {
+      if (n >= units[i][0]) {
+        var v = n / units[i][0];
+        return (v < 10 ? v.toFixed(1).replace(/\.0$/, '') : String(Math.round(v))) + ' ' + units[i][1];
+      }
+    }
+    return n + ' B';
+  }
+
+  function statRow(label, value, warn) {
+    dom.diagStats.appendChild(el('span', 'diag-stat-label', label));
+    dom.diagStats.appendChild(el('span', 'diag-stat-value' + (warn ? ' is-warn' : ''), value));
+  }
+
+  // One Codex home. The Open button carries the root's INDEX and nothing else —
+  // main resolves the path from its own list, so this window never gets to name
+  // a folder for the OS to open.
+  function rootRow(root, index) {
+    var row = el('div', 'diag-root');
+
+    var pathEl = el('span', 'diag-path', root.path || '(unknown)');
+    pathEl.title = root.path || '';
+    row.appendChild(pathEl);
+
+    var exists = !!root.exists;
+    var tag = el('span', 'diag-tag' + (exists ? '' : ' is-missing'), exists ? 'found' : 'missing');
+    tag.title = exists ? 'This folder exists on disk' : 'No such folder — SubSplit has nothing to read here';
+    row.appendChild(tag);
+
+    var open = el('button', 'btn btn-ghost btn-sm', 'Open');
+    open.type = 'button';
+    open.dataset.rootIndex = String(index);
+    row.appendChild(open);
+
+    return row;
+  }
+
+  function renderDiagnostics() {
+    if (!current) return;
+    var local = current.local;
+
+    dom.diagRoots.textContent = '';
+    if (!local.roots.length) {
+      dom.diagRoots.appendChild(el('p', 'diag-value', 'No Codex home resolved.'));
+    } else {
+      local.roots.forEach(function (root, index) {
+        dom.diagRoots.appendChild(rootRow(root, index));
+      });
+    }
+
+    dom.diagAppData.textContent = local.appDataPath || '';
+    dom.diagAppData.title = local.appDataPath || '';
+
+    var stats = local.stats || {};
+    dom.diagStats.textContent = '';
+    statRow('Files', String(Math.round(num(stats.files))));
+    statRow('New bytes', fmtBytes(stats.newBytes));
+    // Per-scan, like everything else in this block: an incremental scan reads
+    // almost no new bytes, so this is normally 0 even when a cold scan skipped
+    // lines. Say so in the label rather than letting it read as a running total.
+    statRow('Bad lines (this scan)', String(Math.round(num(stats.badLines))), num(stats.badLines) > 0);
+    statRow('Fork baselines', String(Math.round(num(stats.forkBaselines))));
+    statRow('Scanned', local.lastScanAt == null ? 'never' : fmtAgo(Date.now() - local.lastScanAt));
+
+    dom.diagLogin.textContent = local.loginItemEnabled ? 'Enabled' : 'Not enabled';
+  }
+
+  function setHealthNote(message, ok) {
+    if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
+    dom.diagHealth.textContent = message || '';
+    dom.diagHealth.classList.toggle('is-ok', !!message && ok === true);
+    dom.diagHealth.classList.toggle('is-bad', !!message && ok === false);
+    if (message && ok !== null) {
+      healthTimer = setTimeout(function () {
+        healthTimer = null;
+        setHealthNote('', null);
+      }, 8000);
+    }
+  }
+
+  function healthSummary(result) {
+    var latency = result.latencyMs == null ? null : Math.round(Number(result.latencyMs));
+    if (result.ok) {
+      var text = 'Reachable';
+      if (latency != null && isFinite(latency)) text += ' · ' + latency + ' ms';
+      if (result.version) text += ' · server v' + result.version;
+      return text;
+    }
+    var why = result.error && result.error.message ? result.error.message : 'No answer from the server.';
+    return 'Unreachable — ' + why;
+  }
+
+  function doTestConnection() {
+    if (busy.health) return;
+    busy.health = true;
+    dom.testConnectionBtn.disabled = true;
+    setHealthNote('Testing…', null);
+    // The field as it stands, not the saved setting: the button exists for
+    // exactly the case where the two differ. Main validates it — blank falls
+    // back to the stored URL, malformed is reported as malformed.
+    var typedUrl = dom.fServer ? String(dom.fServer.value || '').trim() : '';
+    Promise.resolve(api.testConnection(typedUrl)).then(function (result) {
+      busy.health = false;
+      dom.testConnectionBtn.disabled = false;
+      var res = result && typeof result === 'object' ? result : { ok: false, error: null };
+      setHealthNote(healthSummary(res), !!res.ok);
+    }, function (err) {
+      busy.health = false;
+      dom.testConnectionBtn.disabled = false;
+      setHealthNote('Unreachable — ' + errMessage(err), false);
+    });
+  }
+
+  // `target` is a root index or the 'app-data' enum — never a path.
+  function doOpenFolder(target) {
+    Promise.resolve(api.openFolder(target)).then(function (result) {
+      var res = result || {};
+      if (!res.ok) setFormError(res.error || 'That folder could not be opened.');
+      else setFormError(null);
+    }, function (err) {
+      setFormError(errMessage(err));
+    });
   }
 
   /* ───────────────────────── invites ───────────────────────── */
@@ -918,6 +1073,16 @@
     dom.fServer.addEventListener('input', function () {
       if (fromInvite && !sameServer(dom.fServer.value, inviteServer)) clearInvite();
     });
+    // Delegated: each Open button carries its root's index, not its path.
+    dom.diagRoots.addEventListener('click', function (event) {
+      var btn = event.target.closest ? event.target.closest('button[data-root-index]') : null;
+      if (!btn) return;
+      var index = Number(btn.dataset.rootIndex);
+      if (isFinite(index)) doOpenFolder(index);
+    });
+    dom.openAppDataBtn.addEventListener('click', function () { doOpenFolder('app-data'); });
+    dom.testConnectionBtn.addEventListener('click', doTestConnection);
+
     dom.formBack.addEventListener('click', function () {
       if (!current || !current.configured) return;
       setMode('dash');
@@ -1071,6 +1236,34 @@
           };
         });
       },
+      openFolder: function (target) {
+        return delay(120).then(function () {
+          console.info('[mock] openFolder(' + JSON.stringify(target) + ')');
+          if (target !== 'app-data' && !(state.local.roots || [])[target]) {
+            return { ok: false, error: 'There is no folder to open there.' };
+          }
+          return { ok: true };
+        });
+      },
+      testConnection: function (serverUrl) {
+        return delay(500).then(function () {
+          console.info('[mock] testConnection(' + JSON.stringify(serverUrl || '') + ')');
+          // Both outcomes are reachable from the mock: healthy by default, and
+          // a failure in the scenarios where the server is the suspect.
+          var broken = scenario === 'error' || scenario === 'nodata';
+          state.sync.health = broken
+            ? {
+                ok: false,
+                latencyMs: 5000,
+                version: null,
+                error: { code: 'timeout', message: 'The server did not answer within 5s.' },
+                checkedAt: Date.now()
+              }
+            : { ok: true, latencyMs: 128, version: '1', error: null, checkedAt: Date.now() };
+          emit();
+          return clone(state.sync.health);
+        });
+      },
       quit: function () { console.info('[mock] quit()'); },
       onState: function (cb) {
         listeners.push(cb);
@@ -1164,7 +1357,10 @@
           }
         },
         lastScanAt: now - 24000,
-        stats: { files: 138, newBytes: 41233, badLines: 0, forkBaselines: 3 }
+        stats: { files: 138, newBytes: 41233, badLines: 0, forkBaselines: 3 },
+        roots: [{ path: '/Users/alex/.codex', exists: true }],
+        appDataPath: '/Users/alex/Library/Application Support/SubSplit',
+        loginItemEnabled: true
       },
       group: {
         server_time: now,
@@ -1202,7 +1398,7 @@
         weekly: { projectedPct: 90, hitsAtMs: null, elapsedFraction: 0.69 },
         '5h': { projectedPct: 119, hitsAtMs: now + 174 * 60e3, elapsedFraction: 0.26 }
       },
-      sync: { lastSyncAt: now - 42000, error: null, clockSkewMs: 180 }
+      sync: { lastSyncAt: now - 42000, error: null, clockSkewMs: 180, health: null }
     };
 
     if (scenario === 'onboard') {
@@ -1242,6 +1438,13 @@
     } else if (scenario === 'nodata') {
       state.local.windows = {};
       state.local.stats = { files: 0, newBytes: 0, badLines: 0, forkBaselines: 0 };
+      // The usual reason for a row of zeroes, and what Diagnostics is for: a
+      // CODEX_HOME listing two homes, one of which is not there.
+      state.local.roots = [
+        { path: '/Users/alex/.codex', exists: true },
+        { path: '/Users/alex/Dropbox (Acme, Inc)/.codex', exists: false }
+      ];
+      state.local.loginItemEnabled = false;
       state.group.account_rate_limit = null;
       // No account gauge — no capacity and no pace, so neither is rendered.
       state.capacity = { weekly: null, '5h': null };

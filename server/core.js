@@ -33,6 +33,12 @@ const MAX_MEMBERS = 16;
 const MAX_DEVICES = 32;
 /** Poll cadence advertised to clients on join. */
 const POLL_INTERVAL_S = 60;
+/**
+ * Reported by the unauthenticated GET /v1/health so "Test connection" in the
+ * app can say *which* server answered. Both deploy targets route through this
+ * file, so worker.js and local.js always agree on it.
+ */
+const SERVER_VERSION = '1';
 
 /**
  * How far ahead of the server clock a client-supplied `seq` may be. The client
@@ -595,7 +601,7 @@ function createRouter(options) {
     // --- unauthenticated reachability probe ---------------------------------
     if (path === '/v1/health') {
       if (method !== 'GET' && method !== 'HEAD') return methodNotAllowed('GET');
-      return jsonResult(200, { ok: true, server_time: now });
+      return jsonResult(200, { ok: true, server_time: now, server_version: SERVER_VERSION });
     }
 
     // --- bootstrap a group (run once by whoever pays for Codex) -------------
@@ -752,6 +758,7 @@ module.exports = {
   MAX_MEMBERS,
   MAX_DEVICES,
   POLL_INTERVAL_S,
+  SERVER_VERSION,
   WINDOW_KEYS,
   WINDOW_MS,
   STALE_MS,

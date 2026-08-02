@@ -89,6 +89,45 @@
 
             <p class="field-hint" data-role="f-notify-hint"></p>
           </fieldset>
+
+          <!-- Diagnostics (settings only). Collapsed by default so the form
+               keeps its onboarding shape; everything in it is read-only. -->
+          <details class="diag" data-role="diag" hidden>
+            <summary class="diag-summary">
+              <span>Diagnostics</span>
+              <span class="diag-caret" aria-hidden="true"></span>
+            </summary>
+
+            <div class="diag-body">
+              <div class="diag-block">
+                <p class="diag-label">Codex home</p>
+                <div class="diag-roots" data-role="diag-roots"></div>
+                <div class="diag-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" data-action="open-appdata">Open app data folder</button>
+                  <span class="diag-path-inline" data-role="diag-appdata"></span>
+                </div>
+              </div>
+
+              <div class="diag-block">
+                <p class="diag-label">Last scan</p>
+                <div class="diag-stats" data-role="diag-stats"></div>
+              </div>
+
+              <div class="diag-block">
+                <p class="diag-label">Launch at login</p>
+                <p class="diag-value" data-role="diag-login">—</p>
+                <p class="field-hint">Read back from the OS. macOS can silently ignore this for unsigned builds, so trust what it says here over what you asked for.</p>
+              </div>
+
+              <div class="diag-block">
+                <div class="diag-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" data-action="test-connection">Test connection</button>
+                  <span class="diag-note" data-role="diag-health"></span>
+                </div>
+                <p class="field-hint">Unauthenticated reachability check — your join token is never sent.</p>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="form-actions">

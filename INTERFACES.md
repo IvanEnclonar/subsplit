@@ -203,17 +203,31 @@ evaluateAlerts({ capacity, groupState, settings, memberId, nowMs, syncError }) /
 ## sync.js
 
 ```js
-const { createSync } = require('./sync');
+const { createSync, checkHealth } = require('./sync');
 const sync = createSync({ serverUrl, token, fetchImpl? });   // token = "ss_<group>_<secret>"
 await sync.join(memberName)   // POST /v1/join → { group_id, member_id, member_name, server_time, poll_interval_s }
 await sync.push(payload)      // PUT /v1/state → { accepted, clock_skew_ms, state: GroupState }
 await sync.poll(etag|null)    // GET /v1/state → { notModified: true } | { etag, state: GroupState }
+
+await checkHealth({ serverUrl, fetchImpl?, timeoutMs? })
+// -> { ok: boolean, latencyMs: number, version: string|null, error: {code,message}|null }
 ```
 
 - `payload = { member_id, member_name, device_id, seq, updated_at, window_totals: { "5h": WindowTotals|null, "weekly": WindowTotals|null }, rate_limit: RateSnapshot|null }`
 - `GroupState = { server_time, members: [ { member_id, member_name, devices: [{device_id, seen_ms_ago, stale}], windows: { "5h": {…totals, share_pct}, "weekly": {…} } } ], account_rate_limit: RateSnapshot|null, etag }`
 - Auth header: `Authorization: Bearer ss_<group>_<secret>` on every call. 10s timeout,
   no retries inside sync.js (caller schedules). Reject non-2xx with `{code, message}` error objects.
+- `checkHealth` is deliberately **outside** `createSync`: `request()` attaches the Bearer
+  header to everything it sends, and `/v1/health` is the one route the server answers
+  unauthenticated. It takes **no token argument at all**, so none can reach the wire — a
+  reachability probe that carried the group secret would leak it into every proxy log along
+  a URL the user typed wrong. 5s timeout, and it **never throws**: a failure is the returned
+  value, with `latencyMs` measured either way. `version` comes from `server_version` in the
+  body (`null` when the peer does not send one).
+- `ok: true` requires a 2xx **whose body parses as JSON with `ok === true`**. A bare 2xx is
+  what captive portals, parked domains and SPA catch-alls send, so HTML / an empty body /
+  unrelated JSON on a 2xx is `ok: false` with code `bad_response`; an explicit `{ ok: false }`
+  stays `unhealthy`.
 
 ## Server API (worker.js AND local.js — identical contract)
 
@@ -223,7 +237,9 @@ await sync.poll(etag|null)    // GET /v1/state → { notModified: true } | { eta
   guarded `excluded.seq > devices.seq`. Returns full GroupState in same response.
 - `GET /v1/state` — Bearer auth. Supports `If-None-Match` → 304.
 - `DELETE /v1/state?member_id=&device_id=` — retire a device.
-- `GET /v1/health` — unauthenticated `{ ok: true, server_time }`.
+- `GET /v1/health` — unauthenticated `{ ok: true, server_time, server_version }`.
+  `server_version` is the `SERVER_VERSION` constant in `core.js` (next to the limits block),
+  so both deploy targets report the same string — neither has a health route of its own.
 - Aggregation rules (server-side): SUM window_totals across a member's devices **per window,
   respecting window_start** (window_starts within w/4 of each other are the same window and
   are added, reporting the max; newer-beyond-tolerance resets the accumulator, older skipped);
@@ -271,6 +287,8 @@ Preload exposes `window.subsplit`:
   refreshNow(): Promise<UiState>,     // rescan + push + poll
   copyInvite(): Promise<{ ok: true } | { ok: false, error }>,
   pasteInvite(): Promise<{ ok: true, serverUrl, tokenMasked } | { ok: false, error }>,
+  openFolder(target): Promise<{ ok: true } | { ok: false, error }>,  // target = root INDEX | 'app-data'
+  testConnection(serverUrl): Promise<Health>,  // unauthenticated GET /v1/health, URL as typed
   quit(): void,
   onState(cb): unsubscribeFn,         // main → renderer push on every state change
 }
@@ -279,12 +297,17 @@ Preload exposes `window.subsplit`:
 //   settings: { memberName, memberId, serverUrl, primaryWindow,
 //               notifyEnabled, notifyPct: { "5h": number|null, "weekly": number|null } }
 //             (never the token, never notifyLatch),
-//   local: { windows: computeWindows() result, lastScanAt, stats },
+//   local: { windows: computeWindows() result, lastScanAt, stats,
+//            roots: [ { path: string, exists: boolean } ],   // codexRoots(), one entry each
+//            appDataPath: string|null,                       // settings.js paths().baseDir
+//            loginItemEnabled: boolean },                    // read back from the OS
 //   group: GroupState | null,
 //   capacity: computeCapacity(group) result,   // { "5h": CapacityWindow|null, "weekly": … }
 //   pace: computePace(group, now) result,      // { "5h": Pace|null, "weekly": Pace|null }
-//   sync: { lastSyncAt: ms|null, error: {code,message}|null, clockSkewMs: number|null },
+//   sync: { lastSyncAt: ms|null, error: {code,message}|null, clockSkewMs: number|null,
+//           health: Health | null },
 // }
+// Health = { ok, latencyMs, version: string|null, error: {code,message}|null, checkedAt: ms }
 ```
 
 **Invites.** `copyInvite()` takes no argument: main builds the blob from its own
@@ -307,8 +330,27 @@ before.
 filtered anywhere between `buildUiState()` and the renderer — whatever is added there arrives
 whole, so the token must simply never be put in it.
 
+**Diagnostics.** `openFolder(target)` takes an **index into `local.roots`**, or the string
+enum `'app-data'` — never a path. Main resolves the folder from its own state and calls
+`electron.shell.openPath`, so the channel stays a two-entry menu instead of becoming a
+generic file-opener for a compromised renderer; out-of-range, non-integer and string
+arguments all open nothing and answer `{ ok: false }`. `testConnection(serverUrl)` passes the
+**Server URL field as it currently stands** (unsaved edits included — testing a URL you have
+just typed is the point of the button); main treats that string as untrusted, vets it with
+`validateServerUrl`, and it reaches nothing but the `checkHealth()` fetch — it is never
+persisted. A **blank** field (or a renderer that sent no usable string at all) falls back to
+the stored `serverUrl`; a **non-empty** field that is not a valid `http(s)` URL is answered
+with that validation failure (`{ ok: false, error: { code: 'config', … } }`, no request made)
+rather than falling back — reporting the stored server's health about a URL the user typed
+wrong is the same lie as testing the stored URL in the first place. No token is
+involved anywhere in that path, and the result lands in `UiState.sync.health` as well as being
+returned. `local.roots` and
+`local.loginItemEnabled` are read fresh (`fs.existsSync` per root; `getLoginItemSettings()`
+on `state:get` and on every popover open), because the whole point is to report what is
+true now rather than what was true at launch.
+
 Channels (ipcMain.handle): `state:get`, `settings:save`, `group:join`, `sync:refresh`,
-`invite:copy`, `invite:paste`, `app:quit`.
+`invite:copy`, `invite:paste`, `diag:open`, `diag:health`, `app:quit`.
 Event (webContents.send): `state:changed` with UiState.
 Security: contextIsolation + sandbox stay at defaults, never expose ipcRenderer itself,
 validate channel senders, CSP `script-src 'self'` meta in index.html,
@@ -365,6 +407,17 @@ validate channel senders, CSP `script-src 'self'` meta in index.html,
    form also shows an "Usage alerts" block: enable toggle + a numeric input per window,
    placeholder "auto (fair share)", helper text naming what auto currently equals. An empty
    input means `null` (AUTO). Saved through `saveSettings`.
+   Below it, a **Diagnostics** `<details>` block — collapsed by default and settings-only, so
+   the onboarding flavour of the form is unchanged: every resolved Codex home with a
+   found/missing tag and a per-root **Open** button (carrying the root's *index*, never its
+   path), an **Open app data folder** button, the full `stats` four (files / new bytes / bad
+   lines / fork baselines — all per-scan, and the bad-lines row says so in its label) plus
+   `lastScanAt` as "Xs ago", the launch-at-login status **as read
+   back from the OS** with the unsigned-macOS caveat, and a **Test connection** button that
+   sends the Server URL field's current value and whose ok/fail + latency + server version
+   appears as a transient note beside it. It is disabled (and visibly dimmed) while the probe
+   is in flight. It is read-only:
+   a state push may re-render it mid-edit without touching the fields above.
 2. **Dashboard**: account header — one bar per available window ("Weekly", "5h") with
    account-wide used% + "resets in Xh Ym", and under it the pace line from `UiState.pace`
    ("on pace for ~118% — hits 100% Thu ~2pm", weekday+hour in local time; no hit clause below

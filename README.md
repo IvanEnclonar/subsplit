@@ -127,7 +127,9 @@ npm run dist:win       # nsis + portable
 ```
 
 `dist:win` must run on Windows or in Windows CI — electron-builder cannot produce the NSIS
-installer from macOS. Builds are unsigned; see below.
+installer from macOS. Builds are unsigned; see below. Tagged releases are built by GitHub
+Actions on both platforms — see [.github/RELEASING.md](.github/RELEASING.md) for how to cut
+one and what the published assets are called.
 
 ## Installing an unsigned build
 
@@ -203,6 +205,44 @@ with a Start Menu shortcut carrying the matching AppUserModelID, and the portabl
 does not install one. The `nsis` installer does (`createStartMenuShortcut` is on), so use
 that if you want notifications. macOS asks for notification permission the first time an
 alert fires; Focus modes and Do Not Disturb silence them as usual.
+
+## Troubleshooting
+
+Open the gear and expand **Diagnostics** at the bottom of the settings form. It reports the
+four things that explain nearly every problem, and nothing the panel itself shows is secret —
+your join token is not in it, and the connection test does not send one. (The files behind
+**Open app data folder** are a different matter — see the last item below.)
+
+**The numbers are all zeroes.** Check *Codex home*. Each folder SubSplit looks in is listed
+with a `found` or `missing` tag, and **Open** puts it in front of you. A `missing` root means
+Codex has never run there, or `CODEX_HOME` points somewhere else — it takes a list separated
+by `:` (`;` on Windows), and every entry is shown. Then check *Last scan*: `files: 0` with a
+`found` root means the folder has no `sessions/**/rollout-*.jsonl` in it yet. Every number in
+that block describes the **last scan only**, not a running total — `bad lines (this scan)` is
+0 on a normal incremental scan because almost no new bytes were read. It goes above 0 on the
+first full scan after install, or when new malformed data arrives; a nonzero value means some
+rollout lines were skipped, and everything else still counts.
+
+**Nobody else shows up, or your numbers do not reach the group.** Hit **Test connection**. It
+tests the Server URL as it currently stands in the field above — edit it and re-test without
+saving first — with an unauthenticated `GET /v1/health`, and answers with
+reachable/unreachable, the round trip, and the server's version. Reachable but the dashboard
+still shows a sync error means the token or the group is the problem, not the network —
+re-paste the invite. "Does not look like a SubSplit server" means something answered but it
+was not this app's server: a login portal, a parked domain or the wrong host. Unreachable
+means the URL or the network is: `*.workers.dev` is blocked on plenty of corporate and school
+networks.
+
+**Launch at login does not stick.** The panel shows the status *read back from the OS*, not
+what you asked for. On unsigned macOS builds Electron's `setLoginItemSettings()` can be
+ignored silently, so "Not enabled" right after you ticked it is the honest answer, not a bug.
+
+**Something is wrong with the stored state.** **Open app data folder** points at
+`settings.json` and `cache.json` (the scanner's byte offsets). Deleting `cache.json` forces a
+full re-parse on the next scan. **`settings.json` holds your join token in plain text**, next
+to the server URL, your name and your preferences — it is the group's shared password. Do not
+paste that file, or screenshot it, into a chat or an issue when someone is helping you; send
+the specific line you were asked for instead.
 
 ## Limitations and privacy
 

@@ -5,6 +5,10 @@
   "main": "src/main/index.js",
   "license": "MIT",
   "author": "subsplit contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanEnclonar/subsplit.git"
+  },
   "scripts": {
     "start": "electron .",
     "test": "node --test \"test/*.test.js\"",
@@ -27,7 +31,10 @@
       "package.json"
     ],
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
       "category": "public.app-category.developer-tools",
       "identity": null,
       "hardenedRuntime": false,
@@ -42,12 +49,16 @@
       ]
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
       "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
     }
   }
 }

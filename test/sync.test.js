@@ -585,6 +585,34 @@ test('UiState carries the capacity share, and still never the join token', () =>
   assert.ok(!JSON.stringify(ui).includes(TOKEN));
 });
 
+test('UiState carries the diagnostics fields, and still never the join token', () => {
+  const main = loadMain();
+  main.state.settings = settingsStore.saveSettings({ joinToken: TOKEN, serverUrl: SERVER });
+  main.state.roots = [path.join(os.tmpdir(), 'subsplit-diag-root')];
+  main.state.loginItemEnabled = true;
+  main.state.health = {
+    ok: true,
+    latencyMs: 128,
+    version: '1',
+    error: null,
+    checkedAt: 1_700_000_000_000,
+  };
+
+  const ui = main.buildUiState();
+
+  assert.ok(Array.isArray(ui.local.roots));
+  assert.strictEqual(ui.local.roots.length, 1);
+  assert.strictEqual(ui.local.roots[0].path, main.state.roots[0]);
+  assert.strictEqual(typeof ui.local.roots[0].exists, 'boolean');
+  assert.strictEqual(ui.local.loginItemEnabled, true);
+  assert.deepStrictEqual(ui.sync.health, main.state.health);
+
+  // The whole point of the panel is to explain a broken setup, which is exactly
+  // when someone screenshots it into a group chat.
+  assert.ok(!JSON.stringify(ui).includes(TOKEN), 'no diagnostics field leaks the token');
+  assert.ok(!JSON.stringify(ui.sync.health).includes('Bearer'));
+});
+
 test('joinGroup spends a pending invite, and its token stays out of UiState', async (t) => {
   const main = loadMain();
   const realFetch = globalThis.fetch;

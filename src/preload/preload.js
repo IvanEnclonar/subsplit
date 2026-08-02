@@ -14,7 +14,12 @@ const CHANNEL_GROUP_JOIN = 'group:join';
 const CHANNEL_SYNC_REFRESH = 'sync:refresh';
 const CHANNEL_INVITE_COPY = 'invite:copy';
 const CHANNEL_INVITE_PASTE = 'invite:paste';
+const CHANNEL_DIAG_OPEN = 'diag:open';
+const CHANNEL_DIAG_HEALTH = 'diag:health';
 const CHANNEL_APP_QUIT = 'app:quit';
+
+/** The one non-index folder the diagnostics panel may ask main to open. */
+const TARGET_APP_DATA = 'app-data';
 const CHANNEL_STATE_CHANGED = 'state:changed';
 
 function asString(value) {
@@ -98,6 +103,39 @@ const api = {
    */
   pasteInvite() {
     return ipcRenderer.invoke(CHANNEL_INVITE_PASTE);
+  },
+
+  /**
+   * openFolder(target): Promise<{ ok: true } | { ok: false, error }>
+   * `target` is an INDEX into UiState.local.roots, or the 'app-data' enum.
+   * A path string is not accepted here and is not accepted by main either —
+   * main resolves the folder itself, so this never becomes a way for the
+   * renderer to open an arbitrary file.
+   */
+  openFolder(target) {
+    const safe =
+      target === TARGET_APP_DATA
+        ? TARGET_APP_DATA
+        : Number.isInteger(target) && target >= 0
+          ? target
+          : null;
+    if (safe === null) {
+      return Promise.resolve({ ok: false, error: 'There is no folder to open there.' });
+    }
+    return ipcRenderer.invoke(CHANNEL_DIAG_OPEN, safe);
+  },
+
+  /**
+   * testConnection(serverUrl?): Promise<{ ok, latencyMs, version, error, checkedAt }>
+   * `serverUrl` is the Server URL field as it currently stands, so the button
+   * tests what the user is looking at and not what was last saved. Main treats
+   * it as untrusted: it validates it, falls back to the stored URL only when it
+   * is blank, and reports a malformed one as malformed. Main performs an
+   * unauthenticated GET /v1/health — the join token is not involved, so nothing
+   * about it can be inferred from the answer.
+   */
+  testConnection(serverUrl) {
+    return ipcRenderer.invoke(CHANNEL_DIAG_HEALTH, asString(serverUrl));
   },
 
   /** quit(): void */

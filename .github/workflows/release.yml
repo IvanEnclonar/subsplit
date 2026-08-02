@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# GH_TOKEN is set per step, never job-wide: `npm ci` and the electron-builder run
+# execute third-party code, and neither needs a contents:write token in scope.
+env:
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  # One job owns draft creation. Two jobs racing here would not be safe: GitHub
+  # does not bind a draft to its tag until publish, so two concurrent
+  # `gh release create --draft` calls both succeed and leave two drafts.
+  draft:
+    name: Draft release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Draft for $TAG already exists, reusing it."
+            exit 0
+          fi
+          gh release create "$TAG" --draft --title "SubSplit $TAG" \
+            --notes "Unsigned builds. macOS: System Settings > Privacy & Security > Open Anyway. Windows: SmartScreen > More info > Run anyway. Verify downloads against the SHA256SUMS files."
+
+  macos:
+    name: macOS installers
+    needs: draft
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build dmg + zip (arm64 and x64)
+        env:
+          # build.mac.identity is already null; this keeps electron-builder from
+          # picking up a stray keychain identity on any runner image.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:mac -- --publish never
+
+      - name: Checksums
+        run: |
+          cd dist
+          # GitHub rewrites asset names outside [0-9A-Za-z._-], which would leave
+          # the checksum file naming files no download has.
+          for f in *.dmg *.zip; do
+            case "$f" in
+              *[!0-9A-Za-z._-]*)
+                echo "Artifact name is not GitHub-safe: $f" >&2
+                exit 1
+                ;;
+            esac
+          done
+          shasum -a 256 *.dmg *.zip > SHA256SUMS-macos.txt
+          cat SHA256SUMS-macos.txt
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" \
+            dist/*.dmg \
+            dist/*.zip \
+            dist/SHA256SUMS-macos.txt \
+            --clobber
+
+  windows:
+    name: Windows installers
+    needs: draft
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build nsis + portable
+        run: npm run dist:win -- --publish never
+
+      - name: Checksums
+        run: |
+          cd dist
+          for f in *.exe; do
+            case "$f" in
+              *[!0-9A-Za-z._-]*)
+                echo "Artifact name is not GitHub-safe: $f" >&2
+                exit 1
+                ;;
+            esac
+          done
+          sha256sum *.exe > SHA256SUMS-windows.txt
+          cat SHA256SUMS-windows.txt
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" \
+            dist/*.exe \
+            dist/SHA256SUMS-windows.txt \
+            --clobber
